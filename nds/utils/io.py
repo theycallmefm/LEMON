@@ -20,12 +20,14 @@ def write_mesh(path, mesh):
 
     vertices = mesh.vertices.numpy()
     indices = mesh.indices.numpy() if mesh.indices is not None else None
-    mesh_ = trimesh.Trimesh(vertices=vertices, faces=indices, process=False)
+    
+    vertex_normals = mesh.vertex_normals.numpy() if mesh.vertex_normals is not None else None
+
+    mesh_ = trimesh.Trimesh(vertices=vertices, faces=indices, vertex_normals=vertex_normals, process=False)
     mesh_.export(path)
 
 def read_views(directory, scale, device):
     directory = Path(directory)
-
     image_paths = sorted([path for path in directory.iterdir() if (path.is_file() and path.suffix == '.png')])
     
     views = []

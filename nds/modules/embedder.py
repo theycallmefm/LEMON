@@ -73,3 +73,4 @@ def freenerf_positional_encoding(x, L, step, T, is_pos = False):
         out = out.view(x.shape[0],x.shape[1], L_max)
     #print("third: ", out.shape)
     return out
+

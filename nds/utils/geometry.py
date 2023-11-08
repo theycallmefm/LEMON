@@ -200,7 +200,7 @@ def marching_cubes(voxel_grid: torch.tensor, voxel_occupancy: torch.tensor, leve
 
     from skimage import measure
     spacing = (voxel_grid[1, 1, 1] - voxel_grid[0, 0, 0]).cpu().numpy()
-    vertices, faces, normals, values = measure.marching_cubes_lewiner(voxel_occupancy.cpu().numpy(), level=0.5, spacing=spacing, **kwargs)
+    vertices, faces, normals, values = measure.marching_cubes(voxel_occupancy.cpu().numpy(), level=0.5, spacing=spacing, **kwargs)
 
     # Re-center vertices
     vertices += voxel_grid[0, 0, 0].cpu().numpy()

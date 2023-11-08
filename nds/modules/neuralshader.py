@@ -1,6 +1,6 @@
 
 from nds.modules.fc import FC
-from nds.modules.gfft import GaussianFourierFeatureTransform
+from nds.modules.gfft import GaussianFourierFeatureTransform, CauchyFourierFeatureTransform
 from nds.modules.embedder import get_embedder, freenerf_positional_encoding
 
 import numpy as np
@@ -27,9 +27,12 @@ class NeuralShader(torch.nn.Module):
             self.fourier_feature_transform = GaussianFourierFeatureTransform(3, mapping_size=mapping_size//2, scale=fft_scale, device=device)
             self.diffuse = FC(mapping_size, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None).to(device)
             self.specular = FC(hidden_features_size+3+3, 3, [hidden_features_size // 2], activation, last_activation).to(device)
+        elif fourier_features == 'cauchy':
+            self.fourier_feature_transform = CauchyFourierFeatureTransform(3, mapping_size=mapping_size//2, scale=fft_scale, device=device)
+            self.diffuse = FC(mapping_size, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None).to(device)
+            self.specular = FC(hidden_features_size+3+3, 3, [hidden_features_size // 2], activation, last_activation).to(device)
         elif fourier_features == 'positional':
-            self.fourier_feature_transform, channels = get_embedder(fft_scale)
-            print("channels: ", channels)
+            self.fourier_feature_transform, channels = get_embedder(fft_scale) #channels 27 default
             self.diffuse = FC(channels, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None).to(device)
             self.specular = FC(hidden_features_size+3+3, 3, [hidden_features_size // 2], activation, last_activation).to(device)
         elif fourier_features == 'none':
@@ -64,7 +67,7 @@ class NeuralShader(torch.nn.Module):
             h = self.diffuse(ff)
             h = torch.cat([h, normal, view_dir], dim=-1)
         elif self.freenerf:
-            ff = freenerf_positional_encoding(position, self.L, step, self.T, )
+            ff = freenerf_positional_encoding(position, self.L, step, self.T, is_pos=True)
             h = self.diffuse(ff)
             h = torch.cat([h, normal, view_dir], dim=-1)
         else:

@@ -39,6 +39,7 @@ class NeuralShader(torch.nn.Module):
             self.diffuse = FC(3, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None).to(device)
             self.specular = FC(hidden_features_size+3+3, 3, [hidden_features_size // 2], activation, last_activation).to(device)
         elif fourier_features == 'freenerf':
+            self.fourier_feature_transform, channels = get_embedder(fft_scale) #channels 27 default
             self.freenerf, self.L, self.T = True, L, T
             L_max = 2 * 3 * self.L + 3
             self.diffuse = FC(L_max, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None).to(device)
@@ -62,14 +63,17 @@ class NeuralShader(torch.nn.Module):
     def forward(self, position, normal, view_dir, step = None):
         #! The current apporach only transforms the positions
         #! However it is also possible to transform all the input (views and normals)
-        if self.fourier_feature_transform is not None:
+        if self.freenerf:
+            if step==None:
+                ff = self.fourier_feature_transform(position)
+            else:
+                ff = freenerf_positional_encoding(position, self.L, step, self.T, is_pos=True)
+            h = self.diffuse(ff)
+            h = torch.cat([h, normal, view_dir], dim=-1)
+        elif self.fourier_feature_transform is not None:
             ff = self.fourier_feature_transform(position)
             h = self.diffuse(ff)
-            h = torch.cat([h, normal, view_dir], dim=-1)
-        elif self.freenerf:
-            ff = freenerf_positional_encoding(position, self.L, step, self.T, is_pos=True)
-            h = self.diffuse(ff)
-            h = torch.cat([h, normal, view_dir], dim=-1)
+            h = torch.cat([h, normal, view_dir], dim=-1) 
         else:
             h = self.diffuse(position)
             h = torch.cat([h, normal, view_dir], dim=-1)

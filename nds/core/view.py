@@ -56,6 +56,11 @@ class View:
 
         color = color[:, :, :3]
 
+        #change bg color
+        replacement_color = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32).to(color.device)  # Green color for example
+        color_mask = (mask > 0).squeeze()
+        color[color_mask == 0] = replacement_color
+
         return cls(color, mask, camera, device=device)
 
     def to(self, device: str = "cpu"):
@@ -151,3 +156,24 @@ class View:
         pixels = pixels[..., :2] / pixels[..., 2:]
         depths = points_c[..., 2:] if not depth_as_distance else torch.norm(points_c, p=2, dim=-1, keepdim=True)
         return torch.cat([pixels, depths], dim=-1)
+    
+    def replace_color(self, image_path):
+        """ Replace a view's image with an edited picture.
+
+        Args:
+            image_path (Union[Path, str]): Path to the edited image file that contains the color and optionally the mask
+        """
+        image_path = Path(image_path)
+        
+        # Load the color
+        color = torch.FloatTensor(np.array(Image.open(image_path)))
+        color /= 255.0
+        
+        # Extract the mask
+        if color.shape[2] == 4:
+            mask = color[:, :, 3:]
+        else:
+            mask = torch.ones_like(color[:, :, 0:1])
+
+        color = color[:, :, :3]
+        self.color = color.to(self.device)

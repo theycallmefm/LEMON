@@ -1,0 +1,40 @@
+experiment_name: "experiment/owl-panda"
+input_dir: "./data/122_owl_resized/views"
+input_bbox: "./data/122_owl/bbox.txt"
+output_dir: "./out/"
+initial_mesh: "vh32"
+image_scale: 1.0
+iterations: 20000
+lr_vertices: 1.0e-3
+lr_shader: 1.0e-3
+upsample_iterations: [500, 1000, 1500]
+save_frequency: 100
+visualization_frequency: 100
+visualization_views: []
+device: 0
+weight_mask: 2.0
+weight_normal: 0.1
+weight_laplacian: 40.0
+weight_shading: 1.0
+shading_percentage: 0.75
+hidden_features_layers: 3
+hidden_features_size: 256
+fourier_features: "positional"
+activation: "relu"
+fft_scale: 4
+#freenerf #NOT IMPORTANT
+L: 4 #L_max = 2 * 3 * self.L + 3 
+T: 10000 
+#diffusion
+pipeline: "our-mcnet"
+cfg-text: 3.0
+weight_edit: 1.0
+prompt: "Make it look like panda"
+cfg-ip2p: 1.0
+cfg-normal: 0.8
+seed: null
+steps: 10
+edit_begin: 2000
+edit_frequency: 13 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
+edit_save_frequency: 13
+comment: "Add your comments here"

@@ -3,7 +3,7 @@ import numpy as np
 import random
 
 class ViewSampler:
-    modes = ['random', 'sequential', 'sequential_shuffled']
+    modes = ['random', 'sequential', 'sequential_shuffled', 'random_with_idx', 'sequential_with_idx']
 
     def __init__(self, views, mode, views_per_iter):
         if not mode in self.modes:
@@ -18,7 +18,7 @@ class ViewSampler:
     @staticmethod
     def add_arguments(parser: ArgumentParser):
         group = parser.add_argument_group("View Sampling")
-        group.add_argument('--view_sampling_mode', type=str, choices=ViewSampler.modes, default='random', help="Mode used to sample views.")
+        group.add_argument('--view_sampling_mode', type=str, choices=ViewSampler.modes, default='sequential_with_idx', help="Mode used to sample views.")
         group.add_argument('--views_per_iter', type=int, default=1, help="Number of views used per iteration.")
         
     @staticmethod
@@ -32,6 +32,12 @@ class ViewSampler:
         if self.mode == 'random':
             # Randomly select N views
             return np.random.choice(views, self.views_per_iter, replace=False)
+        elif self.mode == 'random_with_idx':
+            selected_indices = np.random.choice(self.index_buffer, self.views_per_iter, replace=False)
+            sampled_views = []
+            for i in range(self.views_per_iter):
+                sampled_views += [views[selected_indices[i]]]
+            return sampled_views, selected_indices
         elif self.mode == 'sequential':
             # Select N views by traversing the full set of views sequentially
             # (After the last view, start again from the first)
@@ -40,6 +46,14 @@ class ViewSampler:
                 sampled_views += [views[self.current_index]]
                 self.current_index = (self.current_index + 1) % self.num_views
             return sampled_views
+        elif self.mode == 'sequential_with_idx':
+            selected_indices = []
+            sampled_views = []
+            for _ in range(self.views_per_iter):
+                sampled_views += [views[self.current_index]]
+                selected_indices += [self.current_index]
+                self.current_index = (self.current_index + 1) % self.num_views
+            return sampled_views, selected_indices
         elif self.mode == 'sequential_shuffled':
             # Select N views by traversing the full set of views sequentially, but in random order
             # (Each time the full set of views is traversed, randomly shuffle to create a new order)

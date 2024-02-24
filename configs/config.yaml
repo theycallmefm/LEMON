@@ -1,7 +1,7 @@
-experiment_name: "experiment/owl-panda"
-input_dir: "./data/122_owl_resized/views"
+experiment_name: "combinedinput-experiment/owl-phoenix-input-08render-02gt"
+input_dir: "./data/122_owl_512/views"
 input_bbox: "./data/122_owl/bbox.txt"
-output_dir: "./out/"
+output_dir: "./out/mc/"
 initial_mesh: "vh32"
 image_scale: 1.0
 iterations: 20000
@@ -11,7 +11,7 @@ upsample_iterations: [500, 1000, 1500]
 save_frequency: 100
 visualization_frequency: 100
 visualization_views: []
-device: 0
+device: 1
 weight_mask: 2.0
 weight_normal: 0.1
 weight_laplacian: 40.0
@@ -27,14 +27,15 @@ L: 4 #L_max = 2 * 3 * self.L + 3
 T: 10000 
 #diffusion
 pipeline: "our-mcnet"
-cfg-text: 3.0 #guidance scale for controlnet
+cfg-text: 7.5 #guidance scale for controlnet
 weight_edit: 1.0 #this replaces shading weight after editing starts
-prompt: "Make it look like panda"
+prompt: "Make it look like phoenix"
+negative_prompt: ""
 cfg-ip2p: 1.0
 cfg-normal: 0.8
-seed: null
+seed: 42
 steps: 10
 edit_begin: 2000
 edit_frequency: 13 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
 edit_save_frequency: 13
-comment: "Add your comments here"
+comment: "controlnet input:0.8 render latent + 0.2 gt_latent + random noise, condition:original,normal 512 size"

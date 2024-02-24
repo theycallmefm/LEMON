@@ -35,13 +35,13 @@ SD_SOURCE = "runwayml/stable-diffusion-v1-5"
 import yaml
 
 
-def blackbox_update_view(original_image, rendered_image, pipe, args, normal_image):
+def blackbox_update_view(original_image, rendered_image, pipe, args, normal_image, noise = None):
     original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2)
     rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2).to(torch.float32)
     normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2).to(torch.float32)
     
     prompt = args.prompt
-    negative_prompt = "background"
+    negative_prompt = args.negative_prompt
     #images = [rendered_image, normal_image]
     images = [original_image, normal_image]
 
@@ -52,20 +52,18 @@ def blackbox_update_view(original_image, rendered_image, pipe, args, normal_imag
         num_inference_steps = args.steps,
         generator = torch.Generator(device=original_image.device),
         guidance_scale = args.cfg_text,
-        #negative_prompt=negative_prompt,
+        negative_prompt=negative_prompt,
         controlnet_conditioning_scale=[args.cfg_ip2p, args.cfg_normal],
     ).images[0]
     
-    if (args.edit_save_frequency % iteration == 0):
+    if (iteration % args.edit_save_frequency == 0):
         saved_image_path = str(edits_save_path)+"/"+str(iteration)+".png"
         edited_image.save(saved_image_path)
     edited_image = torch.tensor(np.array(edited_image), device = original_image.device) / 255.0
 
     return edited_image
 
-
-
-def our_update_view(original_image, rendered_image, model, args, normal_image):
+def our_update_view(original_image, rendered_image, model, args, normal_image, noise = None):
     original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2)
     rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2)
     normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2)
@@ -77,7 +75,7 @@ def our_update_view(original_image, rendered_image, model, args, normal_image):
 
 
     text_embedding = model.pipe._encode_prompt(
-            prompt, device= ip2p_device, num_images_per_prompt=1, do_classifier_free_guidance=True, negative_prompt=""
+            prompt, device= ip2p_device, num_images_per_prompt=1, do_classifier_free_guidance=True, negative_prompt=args.negative_prompt
         )
     
     text_embedding = text_embedding.to(original_image.dtype)#for full precision
@@ -88,7 +86,8 @@ def our_update_view(original_image, rendered_image, model, args, normal_image):
                             original_image,
                             normal_image,
                             guidance_scale = guidance_scale,
-                            diffusion_steps = diffusion_steps
+                            diffusion_steps = diffusion_steps,
+                            noise = noise
                         )
         
     edited_image = rearrange(edited_image, "1 c h w -> h w c")
@@ -98,6 +97,7 @@ def our_update_view(original_image, rendered_image, model, args, normal_image):
         saved_image_path = str(edits_save_path)+"/"+str(iteration)+".png"
         saved_image.save(saved_image_path)
     return edited_image
+
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='Multi-View Mesh Reconstruction with Neural Deferred Shading', formatter_class=ArgumentDefaultsHelpFormatter)
@@ -138,6 +138,7 @@ if __name__ == '__main__':
     parser.add_argument('--pipeline', type=str, default='our-mcnet', choices=(['our-mcnet','blackbox-mcnet']), help="Input encoding used in the neural shader")
     parser.add_argument("--cfg-text", default=7.5, type=int, help="hyperparameter that controls guidance scale")
     parser.add_argument("--prompt", required=False, type=str)
+    parser.add_argument("--negative_prompt", required=False, type=str, default="")
     parser.add_argument("--cfg-ip2p", default=1.0, type=float, help = "ip2p controlnet condition scale")
     parser.add_argument("--cfg-normal", default=0.8, type=float, help = "normal controlnet condition scale")
     parser.add_argument("--seed", type=int, default=None) #23019
@@ -175,11 +176,13 @@ if __name__ == '__main__':
 
     if args.pipeline == "our-mcnet":
         #Our pipeline
+        print("using ours")
         ip2p_use_full_precision = True
         pipe = MultiControlNet(device, ip2p_use_full_precision=ip2p_use_full_precision, args=args) #TODO change naming pipe to model later
         update_view = our_update_view
     elif args.pipeline == "blackbox-mcnet":
         #Blackbox Multicontrolnet
+        print("using blackbox")
         controlnet = [
             ControlNetModel.from_pretrained(CONTROLNET_IP2P_SOURCE, torch_dtype=torch.float32),
             ControlNetModel.from_pretrained(CONTROLNET_NORMAL_SOURCE, torch_dtype=torch.float32),
@@ -282,6 +285,14 @@ if __name__ == '__main__':
 
     edit = False
     freenerf = False
+    #noise = None
+    noise = 1
+    #  # Create a tensor with the desired shape
+    # template_tensor = torch.empty(1, 4, 96, 120)
+
+    # # Generate a random tensor with the same shape
+    # noise = torch.rand_like(template_tensor, device=device)
+
     
 
     progress_bar = tqdm(range(1, args.iterations + 1))
@@ -385,7 +396,7 @@ if __name__ == '__main__':
                     plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image)
                                   
         #Edit views
-        if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):
+        if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):       
             if rendered_images == []:
                 with torch.no_grad():
                     use_fixed_views = len(args.visualization_views) > 0
@@ -399,6 +410,14 @@ if __name__ == '__main__':
 
                         # Save the shaded rendering
                         shaded_image = shader(position, normal, view_direction, iteration) * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
+                        if noise == None:
+                            with torch.no_grad():
+                                # prepare image and image_cond latents
+                                render_latents = pipe.imgs_to_latent(shaded_image.unsqueeze(0).permute(0, 3, 1, 2))
+                                #gt_latents = self.prepare_image_latents(image_cond)
+                                #image_cond_latents = self.prepare_image_latents(image_cond)
+                                #latents = 0.8 * render_latents + 0.2 * gt_latents
+                            noise = torch.randn_like(render_latents)    
                         rendered_images.append(shaded_image)
 
                         R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], device=device, dtype=torch.float32)
@@ -417,7 +436,7 @@ if __name__ == '__main__':
                 
                 #edited_image = update_view(gt_color, rendered_image, model, args)
                 normal_image = normal_images[ri]
-                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image)
+                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, None)
                 
                 # shaded_path = (images_save_path / str(vi) / "shaded") if use_fixed_views else (images_save_path / "shaded")
                 # shaded_path.mkdir(parents=True, exist_ok=True)

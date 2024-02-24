@@ -129,7 +129,8 @@ class MultiControlNet(nn.Module):
         guidance_scale: float = 7.5,
         diffusion_steps: int = 20,
         lower_bound: float = 0.70,
-        upper_bound: float = 0.98
+        upper_bound: float = 0.98,
+        noise = None
     ) -> torch.Tensor:
         """Edit an image for Instruct-NeRF2NeRF using InstructPix2Pix
         Args:
@@ -154,18 +155,20 @@ class MultiControlNet(nn.Module):
         self.scheduler.config.num_train_timesteps = T.item()
         self.scheduler.set_timesteps(diffusion_steps)
 
-        with torch.no_grad():
-            # prepare image and image_cond latents
-            render_latents = self.imgs_to_latent(rendered_image)
-            #gt_latents = self.prepare_image_latents(image_cond)
-            #image_cond_latents = self.prepare_image_latents(image_cond)
-            #latents = 0.8 * render_latents + 0.2 * gt_latents
-            latents = render_latents
-
-        # add noise
-        noise = torch.randn_like(latents)
-        #latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
-        latents = noise
+        if noise == None:
+            with torch.no_grad():
+                # prepare image and image_cond latents
+                render_latents = self.imgs_to_latent(rendered_image)
+                gt_latents = self.imgs_to_latent(gt_cond)
+                #gt_latents = self.prepare_image_latents(image_cond)
+                #image_cond_latents = self.prepare_image_latents(image_cond)
+                latents = 0.8 * render_latents + 0.2 * gt_latents
+                #latents = render_latents
+                #latents = gt_latents
+            # add noise
+            noise = torch.randn_like(latents)    
+        latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
+        #latents = noise
         # sections of code used from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
         controlnet_cond = [gt_cond, normal_cond]
         

@@ -1,7 +1,7 @@
-experiment_name: "combinedinput-experiment/owl-phoenix-input-08render-02gt"
-input_dir: "./data/122_owl_512/views"
-input_bbox: "./data/122_owl/bbox.txt"
-output_dir: "./out/mc/"
+experiment_name: "combinedinput-experiment/owl-phoenix-input-08render-02gt/noise_share"
+input_dir: "./data/122_owl_resized_512/views"
+input_bbox: "./data/122_owl_resized_512/bbox.txt"
+output_dir: "./out/122_owl_resized_512/"
 initial_mesh: "vh32"
 image_scale: 1.0
 iterations: 20000
@@ -11,7 +11,7 @@ upsample_iterations: [500, 1000, 1500]
 save_frequency: 100
 visualization_frequency: 100
 visualization_views: []
-device: 1
+device: 0
 weight_mask: 2.0
 weight_normal: 0.1
 weight_laplacian: 40.0
@@ -33,6 +33,8 @@ prompt: "Make it look like phoenix"
 negative_prompt: ""
 cfg-ip2p: 1.0
 cfg-normal: 0.8
+use_bounds: false
+lambda_i: 0.5
 seed: 42
 steps: 10
 edit_begin: 2000

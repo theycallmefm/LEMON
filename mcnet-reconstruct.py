@@ -63,7 +63,7 @@ def blackbox_update_view(original_image, rendered_image, pipe, args, normal_imag
 
     return edited_image
 
-def our_update_view(original_image, rendered_image, model, args, normal_image, noise = None):
+def our_update_view(original_image, rendered_image, model, args, normal_image, noise = None, base_noises = None):
     original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2)
     rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2)
     normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2)
@@ -80,14 +80,17 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, n
     
     text_embedding = text_embedding.to(original_image.dtype)#for full precision
 
-    edited_image = model.edit_image(
+    edited_image, base_noises = model.edit_image(
                             text_embedding.to(ip2p_device),
                             rendered_image,
                             original_image,
                             normal_image,
                             guidance_scale = guidance_scale,
                             diffusion_steps = diffusion_steps,
-                            noise = noise
+                            use_bounds = args.use_bounds,
+                            noise = noise,
+                            base_noises = base_noises,
+                            lambda_i = args.lambda_i,
                         )
         
     edited_image = rearrange(edited_image, "1 c h w -> h w c")
@@ -96,7 +99,7 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, n
         saved_image = Image.fromarray(edit_x.type(torch.uint8).cpu().numpy())
         saved_image_path = str(edits_save_path)+"/"+str(iteration)+".png"
         saved_image.save(saved_image_path)
-    return edited_image
+    return edited_image, base_noises
 
 
 if __name__ == '__main__':
@@ -216,7 +219,11 @@ if __name__ == '__main__':
     # Read the views one for ground truth, one for edited
     views = read_views(args.input_dir, scale=args.image_scale, device=device)
     edited_views = read_views(args.input_dir, scale=args.image_scale, device=device)
-    
+
+    # Used for picking the base noise for noise sharing
+    base_view_indices = list(range(0,len(views),8))
+    base_noises = None
+
     # Obtain the initial mesh and compute its connectivity
     mesh_initial: Mesh = None
     if args.initial_mesh in mesh_generator_names:
@@ -292,8 +299,6 @@ if __name__ == '__main__':
 
     # # Generate a random tensor with the same shape
     # noise = torch.rand_like(template_tensor, device=device)
-
-    
 
     progress_bar = tqdm(range(1, args.iterations + 1))
     for iteration in progress_bar:
@@ -436,7 +441,14 @@ if __name__ == '__main__':
                 
                 #edited_image = update_view(gt_color, rendered_image, model, args)
                 normal_image = normal_images[ri]
-                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, None)
+                # edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, None)
+                # TODO
+                # If we are at a base image, generate base_noises
+                if edit_view_indices[ri] in base_view_indices:
+                    edited_image, base_noises = update_view(gt_color, rendered_image, pipe, args, normal_image, None, None)
+                # else, give base_noises to be used for diffusion
+                else:
+                    edited_image, _ = update_view(gt_color, rendered_image, pipe, args, normal_image, None, base_noises)
                 
                 # shaded_path = (images_save_path / str(vi) / "shaded") if use_fixed_views else (images_save_path / "shaded")
                 # shaded_path.mkdir(parents=True, exist_ok=True)

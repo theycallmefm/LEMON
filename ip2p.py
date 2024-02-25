@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Union
 
 import torch
+import numpy as np
 from rich.console import Console
 from torch import Tensor, nn
 from jaxtyping import Float
@@ -119,6 +120,37 @@ class MultiControlNet(nn.Module):
         self.unet = pipe.unet
         self.auto_encoder = pipe.vae
 
+    # Our scheduler.add_noise implementation to incorporate noise sharing
+    def add_noise(
+        self,
+        original_samples: torch.FloatTensor,
+        # noise: torch.FloatTensor,
+        # timesteps: torch.IntTensor,
+        base_noises: torch.FloatTensor,
+        lambda_i: float = 0.5,
+        T_ours: int = 0,
+    ) -> torch.FloatTensor:
+        # Make sure alphas and timestep have same device and dtype as original_samples
+        alphas = self.scheduler.alphas.to(device=original_samples.device, dtype=original_samples.dtype)
+        if T_ours == 0:
+            T_ours = len(alphas)
+        z_t = original_samples
+        if base_noises == None: # Base view, generate base_noises
+            T_ours = len(alphas) # We need to do full diffusion for base views
+            base_noises = torch.Tensor().to(device=original_samples.device, dtype=original_samples.dtype)
+            for t in reversed(range(T_ours)): # TODO is this correctly ordered or should it be in reverse?
+                eps_t = torch.rand_like(z_t)
+                r_t = torch.rand_like(z_t)
+                base_noises = torch.cat((base_noises, (eps_t - np.sqrt(1-lambda_i) * r_t) / np.sqrt(lambda_i)))
+                z_t = torch.sqrt(alphas[t]) * z_t + torch.sqrt(1-alphas[t]) * eps_t
+        else: # Non-base view, use base_nosies
+            for t in reversed(range(T_ours)): # TODO is this correctly ordered or should it be in reverse?
+                r_t = torch.rand_like(base_noises[t])
+                eps_t = np.sqrt(lambda_i) * base_noises[t] + np.sqrt(1-lambda_i) * r_t
+                z_t = torch.sqrt(alphas[t]) * z_t + torch.sqrt(1-alphas[t]) * eps_t
+
+        return z_t, base_noises
+
 
     def edit_image(
         self,
@@ -130,7 +162,10 @@ class MultiControlNet(nn.Module):
         diffusion_steps: int = 20,
         lower_bound: float = 0.70,
         upper_bound: float = 0.98,
-        noise = None
+        use_bounds: bool = True,
+        noise = None,
+        base_noises: torch.FloatTensor = None,
+        lambda_i: float = 0.5,
     ) -> torch.Tensor:
         """Edit an image for Instruct-NeRF2NeRF using InstructPix2Pix
         Args:
@@ -155,19 +190,36 @@ class MultiControlNet(nn.Module):
         self.scheduler.config.num_train_timesteps = T.item()
         self.scheduler.set_timesteps(diffusion_steps)
 
-        if noise == None:
-            with torch.no_grad():
-                # prepare image and image_cond latents
-                render_latents = self.imgs_to_latent(rendered_image)
-                gt_latents = self.imgs_to_latent(gt_cond)
-                #gt_latents = self.prepare_image_latents(image_cond)
-                #image_cond_latents = self.prepare_image_latents(image_cond)
-                latents = 0.8 * render_latents + 0.2 * gt_latents
-                #latents = render_latents
-                #latents = gt_latents
-            # add noise
-            noise = torch.randn_like(latents)    
-        latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
+        # if noise == None:
+        #     with torch.no_grad():
+        #         # prepare image and image_cond latents
+        #         render_latents = self.imgs_to_latent(rendered_image)
+        #         gt_latents = self.imgs_to_latent(gt_cond)
+        #         #gt_latents = self.prepare_image_latents(image_cond)
+        #         #image_cond_latents = self.prepare_image_latents(image_cond)
+        #         latents = 0.8 * render_latents + 0.2 * gt_latents
+        #         #latents = render_latents
+        #         #latents = gt_latents
+        #     # add noise
+        #     noise = torch.randn_like(latents)
+
+        # Latent is a mixture of render and ground truth
+        with torch.no_grad():
+            render_latents = self.imgs_to_latent(rendered_image)
+            gt_latents = self.imgs_to_latent(gt_cond)
+            latents = 0.8 * render_latents + 0.2 * gt_latents
+
+        # latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
+
+        # Set lower and upper bounds for our diffusion method
+        min_step_ours = int(len(self.scheduler.alphas) * lower_bound)
+        max_step_ours = int(len(self.scheduler.alphas) * upper_bound)
+        # select t, set multi-step diffusion
+        if use_bounds:
+            T_ours = torch.randint(min_step_ours, max_step_ours + 1, [1], dtype=torch.long, device=self.device)
+        else:
+            T_ours = torch.randint(min_step_ours, max_step_ours + 1, [1], dtype=torch.long, device=self.device)
+        latents, base_noises = self.add_noise(latents, base_noises, lambda_i, T_ours)
         #latents = noise
         # sections of code used from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
         controlnet_cond = [gt_cond, normal_cond]
@@ -221,7 +273,7 @@ class MultiControlNet(nn.Module):
         with torch.no_grad():
             decoded_img = self.latents_to_img(latents)
 
-        return decoded_img
+        return decoded_img, base_noises
 
     def latents_to_img(self, latents: Float[Tensor, "BS 4 H W"]) -> Float[Tensor, "BS 3 H W"]:
         """Convert latents to images

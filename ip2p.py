@@ -81,8 +81,13 @@ class MultiControlNet(nn.Module):
 
         self.nets = nn.ModuleList([ip2p_controlnet, normal_controlnet]).to(device)
         self.conditioning_scale = [args.cfg_ip2p, args.cfg_normal]
+
+
+        #self.nets = nn.ModuleList([normal_controlnet]).to(device)
+        #self.conditioning_scale = [args.cfg_normal]
         
         pipe = StableDiffusionControlNetPipeline.from_pretrained( SD_SOURCE, controlnet=[ip2p_controlnet, normal_controlnet], safety_checker=None, torch_dtype=torch.float16)
+        #pipe = StableDiffusionControlNetPipeline.from_pretrained( SD_SOURCE, controlnet=[normal_controlnet], safety_checker=None, torch_dtype=torch.float16)
         #TODO check controlnet scheduler
         pipe.scheduler = DDIMScheduler.from_pretrained(DDIM_SOURCE, subfolder="scheduler")
         pipe.scheduler.set_timesteps(100)
@@ -110,11 +115,11 @@ class MultiControlNet(nn.Module):
             pipe.unet.float()
             pipe.vae.float()
             self.nets.float()
-        else:
-            if self.device.index:
-                pipe.enable_model_cpu_offload(self.device.index)
-            else:
-                pipe.enable_model_cpu_offload(0)
+        # else:
+        #     if self.device.index:
+        #         pipe.enable_model_cpu_offload(self.device.index)
+        #     else:
+        #         pipe.enable_model_cpu_offload(0)
 
         self.unet = pipe.unet
         self.auto_encoder = pipe.vae
@@ -130,7 +135,8 @@ class MultiControlNet(nn.Module):
         diffusion_steps: int = 20,
         lower_bound: float = 0.70,
         upper_bound: float = 0.98,
-        noise = None
+        noise = None,
+        latent_weight: float = 0.9
     ) -> torch.Tensor:
         """Edit an image for Instruct-NeRF2NeRF using InstructPix2Pix
         Args:
@@ -162,7 +168,7 @@ class MultiControlNet(nn.Module):
                 gt_latents = self.imgs_to_latent(gt_cond)
                 #gt_latents = self.prepare_image_latents(image_cond)
                 #image_cond_latents = self.prepare_image_latents(image_cond)
-                latents = 0.8 * render_latents + 0.2 * gt_latents
+                latents = latent_weight * render_latents + (1 - latent_weight) * gt_latents
                 #latents = render_latents
                 #latents = gt_latents
             # add noise
@@ -171,6 +177,7 @@ class MultiControlNet(nn.Module):
         #latents = noise
         # sections of code used from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
         controlnet_cond = [gt_cond, normal_cond]
+        #controlnet_cond = [normal_cond]
         
         for i, t in enumerate(self.scheduler.timesteps):
 
@@ -332,10 +339,10 @@ class ControlNet(nn.Module):
         original_image: Float[Tensor, "BS 3 H W"],
         normal_image: Float[Tensor, "BS 3 H W"],
         guidance_scale: float = 7.5,
-        image_guidance_scale: float = 1.5,
         diffusion_steps: int = 20,
         lower_bound: float = 0.70,
-        upper_bound: float = 0.98
+        upper_bound: float = 0.98,
+        noise = None
     ) -> torch.Tensor:
         """Edit an image for Instruct-NeRF2NeRF using InstructPix2Pix
         Args:
@@ -371,9 +378,9 @@ class ControlNet(nn.Module):
         # add noise
         noise = torch.randn_like(latents)
         #latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
-        latents = noise
+        #latents = noise
         latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
-        condition = normal_image
+        condition = original_image
 
         # sections of code used from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
         for i, t in enumerate(self.scheduler.timesteps):

@@ -1,19 +1,19 @@
-experiment_name: "combinedinput-experiment/owl-phoenix-input-08render-02gt"
-input_dir: "./data/122_owl_512/views"
-input_bbox: "./data/122_owl/bbox.txt"
+experiment_name: "512_384_correctdata_condition_experiment/redhouse-hogwarts-input-09render-ip2p06-normal04-earlystart-1000-gsincreased"
+input_dir: "./dtu-512-384/24_redhouse/views"
+input_bbox: "./dtu-512-384/24_redhouse/bbox.txt"
 output_dir: "./out/mc/"
 initial_mesh: "vh32"
 image_scale: 1.0
-iterations: 20000
+iterations: 80000
 lr_vertices: 1.0e-3
 lr_shader: 1.0e-3
 upsample_iterations: [500, 1000, 1500]
-save_frequency: 100
-visualization_frequency: 100
+save_frequency: 5000
+visualization_frequency: 5000
 visualization_views: []
 device: 1
 weight_mask: 2.0
-weight_normal: 0.1
+weight_normal: 0.2
 weight_laplacian: 40.0
 weight_shading: 1.0
 shading_percentage: 0.75
@@ -27,15 +27,23 @@ L: 4 #L_max = 2 * 3 * self.L + 3
 T: 10000 
 #diffusion
 pipeline: "our-mcnet"
-cfg-text: 7.5 #guidance scale for controlnet
+cfg_text: 15 #guidance scale for controlnet
 weight_edit: 1.0 #this replaces shading weight after editing starts
-prompt: "Make it look like phoenix"
+prompt: "Make it look like Hogwarts"
 negative_prompt: ""
-cfg-ip2p: 1.0
-cfg-normal: 0.8
+#latent weight scheduling
+latent_step: 0.00
+latent_weight: 0.9
+max_latent_weight: 0.91
+min_latent_weight: 0.1
+latent_change_interval: 2000
+# controlnet conditioning
+cfg_ip2p: 0.6
+cfg_normal: 0.4
+ip2p_use_full_precision: 0
 seed: 42
 steps: 10
-edit_begin: 2000
-edit_frequency: 13 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
-edit_save_frequency: 13
-comment: "controlnet input:0.8 render latent + 0.2 gt_latent + random noise, condition:original,normal 512 size"
+edit_begin: 1000
+edit_frequency: 10 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
+edit_save_frequency: 10000
+comment: "controlnet input: start with 0.1* render latent but add 0.05 every iteration"

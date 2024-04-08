@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--input", required=True, type=str)
     parser.add_argument("--output", required=True, type=str)
     parser.add_argument("--width", default=512, type=int)
-    parser.add_argument("--height", default=512, type=int)
+    parser.add_argument("--height", default=384, type=int)
     parser.add_argument("--pic_extension", default="png", type=str)
     parser.add_argument("--cam_extension", default="txt", type=str)
     

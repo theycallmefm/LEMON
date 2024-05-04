@@ -56,7 +56,7 @@ def blackbox_update_view(original_image, rendered_image, pipe, args, normal_imag
         num_inference_steps=10,
         generator=generator,
         #negative_prompt=negative_prompt,
-        controlnet_conditioning_scale=[args.cfg_ip2p, args.cfg_normal],
+        controlnet_conditioning_scale=args.conditoning_scale,
     ).images[0]
     
     if (iteration % args.edit_save_frequency == 0):
@@ -66,14 +66,21 @@ def blackbox_update_view(original_image, rendered_image, pipe, args, normal_imag
 
     return edited_image
 
-def our_update_view(original_image, rendered_image, model, args, normal_image, iteration, path, noise = None, latent_weight = None):
+def our_update_view(original_image, rendered_image, model, args, normal_image, iteration, path, noise = None, latent_weight = None, depth_image = None):
     original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2)
     rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2)
     normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2)
+    
+    #conditions = [original_image,normal_image]
+    if depth_image != None:
+        depth_image = depth_image.unsqueeze(0).permute(0, 3, 1, 2)
+        #conditions.append(depth_image)
     if not args.ip2p_use_full_precision:
         original_image = original_image.to(torch.float16)
         rendered_image = rendered_image.to(torch.float16)
         normal_image = normal_image.to(torch.float16)
+        if depth_image != None:
+            depth_image = depth_image.to(torch.float16)
     ip2p_device = model.device
     
     if not latent_weight:
@@ -94,10 +101,11 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, i
                             rendered_image,
                             original_image,
                             normal_image,
+                            depth_image,
                             guidance_scale = guidance_scale,
                             diffusion_steps = diffusion_steps,
                             noise = noise,
-                            latent_weight = latent_weight
+                            latent_weight = latent_weight,
                         )
         
     edited_image = rearrange(edited_image, "1 c h w -> h w c")
@@ -108,6 +116,21 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, i
         saved_image.save(saved_image_path)
     return edited_image
 
+def update_gt_views(views, mesh, renderer):
+    with torch.no_grad():
+        for i, view in enumerate(views):
+            gbuffer = renderer.render([view], mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)[0]
+            #dataset update
+            position, normal = gbuffer["position"], gbuffer["normal"]
+            view_direction =  torch.nn.functional.normalize(view.camera.center - position, dim=-1)
+            views[i].color = shader(position, normal, view_direction, iteration) * gbuffer["mask"] + (1-gbuffer["mask"])
+            rgb_threshold = torch.tensor([0.95, 0.95, 0.95], device = views[i].color.device, dtype = views[i].color.dtype)
+            views[i].mask = torch.any(views[i].color <= rgb_threshold, dim=-1).unsqueeze(-1).float()
+            # shaded_path = images_save_path / "loss"
+            # shaded_path.mkdir(parents=True, exist_ok=True)
+            # plt.imsave(shaded_path / f'rendered_{iteration}_{i}.png', views[i].color.detach().cpu().numpy())
+            # print("updated views")
+    print("updated views")
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='Multi-View Mesh Reconstruction with Neural Deferred Shading', formatter_class=ArgumentDefaultsHelpFormatter)
@@ -132,8 +155,9 @@ if __name__ == '__main__':
     parser.add_argument('--weight_normal', type=float, default=0.1, help="Weight of the normal term")
     parser.add_argument('--weight_laplacian', type=float, default=40.0, help="Weight of the laplacian term")
     parser.add_argument('--weight_shading', type=float, default=1.0, help="Weight of the shading term")
-    parser.add_argument('--weight_edit', type=float, default=1.0, help="Weight of the shading term")
+    parser.add_argument('--weight_chamfer', type=float, default=1.0, help="Weight of the chamfer distance")
     parser.add_argument('--shading_percentage', type=float, default=0.75, help="Percentage of valid pixels considered in the shading loss (0-1)")
+    parser.add_argument('--chamfer_percentage', type=float, default=0.75, help="Percentage of valid vertices considered in the chamfer loss (0-1)")
     parser.add_argument('--hidden_features_layers', type=int, default=3, help="Number of hidden layers in the positional feature part of the neural shader")
     parser.add_argument('--hidden_features_size', type=int, default=256, help="Width of the hidden layers in the neural shader")
     parser.add_argument('--fourier_features', type=str, default='positional', choices=(['none', 'gfft', 'positional','freenerf','cauchy']), help="Input encoding used in the neural shader")
@@ -149,8 +173,10 @@ if __name__ == '__main__':
     parser.add_argument("--cfg_text", default=7.5, type=int, help="hyperparameter that controls guidance scale")
     parser.add_argument("--prompt", required=False, type=str)
     parser.add_argument("--negative_prompt", required=False, type=str, default="")
-    parser.add_argument("--cfg_ip2p", default=1.0, type=float, help = "ip2p controlnet condition scale")
-    parser.add_argument("--cfg_normal", default=0.8, type=float, help = "normal controlnet condition scale")
+    parser.add_argument('--controlnet', type=str, nargs='+', default=["ip2p", "normal"], help="names of controlnets, ip2p or normal")
+    parser.add_argument('--conditioning_scale', type=int, nargs='+', default=[0.6, 0.4], help="condition array for controlnets")
+    #parser.add_argument("--cfg_ip2p", default=1.0, type=float, help = "ip2p controlnet condition scale")
+    #parser.add_argument("--cfg_normal", default=0.8, type=float, help = "normal controlnet condition scale")
     parser.add_argument("--seed", type=int, default=None) #23019
     parser.add_argument("--steps", default=10, type=int)
     parser.add_argument("--ip2p_use_full_precision", default=1, type=int)
@@ -307,7 +333,7 @@ if __name__ == '__main__':
         "normal": args.weight_normal,
         "laplacian": args.weight_laplacian,
         "shading": args.weight_shading,
-       # "edit": args.weight_edit
+        #"chamfer": 0.0
     }
     losses = {k: torch.tensor(0.0, device=device) for k in loss_weights}
 
@@ -315,24 +341,26 @@ if __name__ == '__main__':
     freenerf = False
     #noise = None
     #  # Create a tensor with the desired shape
-    # template_tensor = torch.empty(1, 4, 96, 120)
+    template_tensor = torch.empty((1, 4, 48, 64), dtype=torch.float16)
 
     # # Generate a random tensor with the same shape
-    # noise = torch.rand_like(template_tensor, device=device)
+    noise = torch.randn_like(template_tensor, device=device)
 
     adaptable = False
-
+    changed_view  = 0
+    edit_frequency = args.edit_frequency
     progress_bar = tqdm(range(1, args.iterations + 1))
     latent_weight = args.latent_weight
+    refinement = False
+    refinement_begin = [4000,8000,12000,16000]
+    refinement_end = [6000,10000,14000,18000]
     for iteration in progress_bar:
         progress_bar.set_description(desc=f'Iteration {iteration}')
 
-        if iteration == args.edit_begin:
-            loss_weights["shading"] = args.weight_edit
-            if args.fourier_features == "freenerf":
-                freenerf = True
-            #loss_weights['laplacian'] *= 16
-            #edit = True
+        # if iteration in refinement_begin:
+        #     refinement = True
+        # elif iteration in refinement_end:
+        #     refinement = False
         #latent weight scheduling
         if args.latent_step and iteration > args.edit_begin and iteration % args.latent_change_interval == 0 and latent_weight < args.max_latent_weight and latent_weight>args.min_latent_weight: #fight darkness
             latent_weight += args.latent_step
@@ -357,7 +385,47 @@ if __name__ == '__main__':
             vertex_offsets = torch.zeros_like(mesh_initial.vertices)
             vertex_offsets.requires_grad = True
             optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
+            # if iteration == args.upsample_iterations[len(args.upsample_iterations)-1]:
+            #     update_gt_views(views, mesh_initial, renderer)
+            #     shaded_path = images_save_path / "loss"
+            #     shaded_path.mkdir(parents=True, exist_ok=True)
+            #     plt.imsave(shaded_path / f'rendered_{iteration}_{0}.png', views[0].color.detach().cpu().numpy())
+        
+        # if iteration == 10000: #smurf-sonic-upscale2-changewithrendermask_any_lrmasklossincrease
+        #     # Create a new optimizer for the vertex offsets
+        #     loss_weights['mask'] *= 2
+        #     lr_vertices *=2.0
+        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
+        #     vertex_offsets.requires_grad = True
+        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
+        
+        
+        # if iteration == args.edit_begin:
+        #     mesh_initial = mesh
+        #     lr_vertices = args.lr_vertices
+        #     # Create a new optimizer for the vertex offsets
+        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
+        #     vertex_offsets.requires_grad = True
+        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
+        
+        # if iteration == args.edit_begin+2000:
+        #     mesh_initial = mesh
+        #     lr_vertices *=0.75
+        #     # Create a new optimizer for the vertex offsets
+        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
+        #     vertex_offsets.requires_grad = True
+        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
 
+        # if iteration == args.edit_begin+4000:
+        #     mesh_initial = mesh
+        #     lr_vertices *=0.75
+        #     # Create a new optimizer for the vertex offsets
+        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
+        #     vertex_offsets.requires_grad = True
+        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
+        # if iteration == args.edit_begin:
+        #     gt_vertices = mesh_initial.vertices
+        #     loss_weights['chamfer'] = args.weight_chamfer
         # Deform the initial mesh
         mesh = mesh_initial.with_vertices(mesh_initial.vertices + vertex_offsets) #vertex_offsets.requires_grad = True
         views_subset, edited_subset, edit_view_indices = view_sampler(views, edited_views)
@@ -365,17 +433,14 @@ if __name__ == '__main__':
         # Perform antialiasing here because we cannot antialias after shading if we only shade a some of the pixels:
         gbuffers = renderer.render(edited_subset, mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)
 
-        if iteration <args.edit_begin and loss_weights['mask'] > 0:
+        if loss_weights['mask'] > 0:
             losses['mask'] = mask_loss(edited_subset, gbuffers)
-        else:
-            losses['mask'] = 0.0
         if loss_weights['normal'] > 0:
             losses['normal'] = normal_consistency_loss(mesh)
         if loss_weights['laplacian'] > 0:
             losses['laplacian'] = laplacian_loss(mesh)
         if loss_weights['shading'] > 0:
             losses['shading'] = shading_loss(edited_subset, gbuffers, shader=shader, shading_percentage=args.shading_percentage, freenerf=freenerf, iteration = iteration, images_save_path = images_save_path, edit = edit)
-            
 
         loss = torch.tensor(0., device=device)
         for k, v in losses.items():
@@ -390,29 +455,57 @@ if __name__ == '__main__':
 
         progress_bar.set_postfix({'loss': loss.detach().cpu()})
 
-        rendered_images, normal_images = [], []
+        rendered_images, normal_images, depth_images, masks = [], [], [], []
         view_indices = []
         # Visualizations
-        if(args.visualization_frequency > 0) and shader and (iteration == 1 or iteration % args.visualization_frequency == 0):
+        if(args.visualization_frequency > 0) and shader and (iteration == 1 or iteration % args.visualization_frequency == 0 or iteration % 2004 == 0):
         #if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):
             import matplotlib.pyplot as plt
             with torch.no_grad():
                 use_fixed_views = len(args.visualization_views) > 0
                 view_indices = args.visualization_views if use_fixed_views else [np.random.choice(list(range(len(edited_subset))))]
                 for vi in view_indices:
+                    #debug_gt_view = views[vi] if use_fixed_views else views_subset[vi]
                     debug_view = edited_views[vi] if use_fixed_views else edited_subset[vi]
-                    debug_gbuffer = renderer.render([debug_view], mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)[0]
-                    position = debug_gbuffer["position"]
-                    normal = debug_gbuffer["normal"]
+                    debug_gbuffer = renderer.render([debug_view], mesh, channels=['mask', 'position', 'normal','depth'], with_antialiasing=True)[0]
+                    position, normal, depth = debug_gbuffer["position"], debug_gbuffer["normal"], debug_gbuffer["depth"]
+
                     view_direction = torch.nn.functional.normalize(debug_view.camera.center - position, dim=-1)
 
                     # Save the shaded rendering
-                    shaded_image = shader(position, normal, view_direction, iteration) * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
+                    shaded_image = shader(position, normal, view_direction, iteration) if freenerf else shader(position, normal, view_direction) 
+                    shaded_image = shaded_image * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
                     rendered_images.append(shaded_image)
+
+                    
                     
                     shaded_path = (images_save_path / str(vi) / "shaded") if use_fixed_views else (images_save_path / "shaded")
                     shaded_path.mkdir(parents=True, exist_ok=True)
                     plt.imsave(shaded_path / f'neuralshading_{iteration}.png', shaded_image.cpu().numpy())
+
+                    #depth_image = (depth - depth.min()) / (depth.max() - depth.min())
+
+                    # depth_image = torch.cat([depth, depth, depth], dim=2)
+                    # # Normalize the depth map between 0 and 1
+                    # depth_min = depth_image.min()  # Minimum value in the tensor
+                    # depth_max = depth_image.max()  # Maximum value in the tensor
+
+                    # # Perform normalization
+                    # depth_image = (depth_image - depth_min) / (depth_max - depth_min)  # Now [0, 1] range
+                    # depth_image = depth_image * debug_gbuffer["mask"] +(1-debug_gbuffer["mask"])
+
+                    # depth_image = 1 - depth_image
+                    # depth_images.append(depth_image)
+
+                    # depth_path = (images_save_path / str(vi) / "depth") if use_fixed_views else (images_save_path / "depth")
+                    # depth_path.mkdir(parents=True, exist_ok=True)
+                    # plt.imsave(depth_path / f'neuralshading_{iteration}.png', depth_image.cpu().numpy())
+
+                    # mask = (debug_view.mask > 0) & (debug_gbuffer["mask"] > 0)
+                    # #masks.append(mask)
+                    # mask_path = (images_save_path / str(vi) / "mask") if use_fixed_views else (images_save_path / "mask")
+                    # mask_path.mkdir(parents=True, exist_ok=True)
+                    # plt.imsave(mask_path / f'neuralshading_{iteration}.png', mask.repeat(1, 1, 3).float().cpu().numpy())
 
                     # Save a normal map in camera space
                     normal_path = (images_save_path / str(vi) / "normal") if use_fixed_views else (images_save_path / "normal")
@@ -429,21 +522,36 @@ if __name__ == '__main__':
                     plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image)
                                   
         #Edit views
-        if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):       
+        if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % edit_frequency == 0) and not refinement:       
             if rendered_images == []:
                 with torch.no_grad():
                     use_fixed_views = len(args.visualization_views) > 0
                     view_indices = args.visualization_views if use_fixed_views else [np.random.choice(list(range(len(edited_subset))))]
                     for vi in view_indices:
+                        #debug_gt_view = views[vi] if use_fixed_views else views_subset[vi]
                         debug_view = edited_views[vi] if use_fixed_views else edited_subset[vi]
-                        debug_gbuffer = renderer.render([debug_view], mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)[0]
-                        position = debug_gbuffer["position"]
-                        normal = debug_gbuffer["normal"]
+                        debug_gbuffer = renderer.render([debug_view], mesh, channels=['mask', 'position', 'normal', 'depth'], with_antialiasing=True)[0]
+                        position, normal, depth = debug_gbuffer["position"], debug_gbuffer["normal"], debug_gbuffer["depth"]
                         view_direction = torch.nn.functional.normalize(debug_view.camera.center - position, dim=-1)
 
                         # Save the shaded rendering
-                        shaded_image = shader(position, normal, view_direction, iteration) * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
+                        shaded_image = shader(position, normal, view_direction, iteration) if freenerf else shader(position, normal, view_direction) 
+                        shaded_image = shaded_image * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
                         rendered_images.append(shaded_image)
+                        # mask = (debug_gt_view.mask > 0) & (debug_gbuffer["mask"] > 0)
+                        # masks.append(mask)
+
+                        # depth_image = torch.cat([depth, depth, depth], dim=2)
+                        # # Normalize the depth map between 0 and 1
+                        # depth_min = depth_image.min()  # Minimum value in the tensor
+                        # depth_max = depth_image.max()  # Maximum value in the tensor
+
+                        # # Perform normalization
+                        # depth_image = (depth_image - depth_min) / (depth_max - depth_min)  # Now [0, 1] range
+                        # depth_image = depth_image * debug_gbuffer["mask"] +(1-debug_gbuffer["mask"])
+
+                        # depth_image = 1 - depth_image
+                        # depth_images.append(depth_image)
 
                         R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], device=device, dtype=torch.float32)
                         #normal_image = normal @ debug_view.camera.R.T @ R.T 
@@ -457,28 +565,47 @@ if __name__ == '__main__':
             for ri, vi in enumerate(view_indices):
                 gt_view = views[vi] if use_fixed_views else views_subset[vi]
                 
-                mask = ((gt_view.mask > 0) & (debug_gbuffer["mask"] > 0)).squeeze()
+                #mask = (gt_view.mask > 0) & (masks[ri] > 0)
                 
                 gt_color = gt_view.color #* 255.0
                 rendered_image = rendered_images[ri] #* 255.0
                 
                 #edited_image = update_view(gt_color, rendered_image, model, args)
                 normal_image = normal_images[ri]
-                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, iteration, images_save_path, None, latent_weight=latent_weight)
+                if depth_images!=[]:
+                    depth_image = depth_images[ri]
+                #mask = masks[ri]
+                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, iteration, images_save_path, noise=None, latent_weight=latent_weight, depth_image=None)
                 
-                # shaded_path = (images_save_path / str(vi) / "shaded") if use_fixed_views else (images_save_path / "shaded")
-                # shaded_path.mkdir(parents=True, exist_ok=True)
-                
+                #rgb_threshold = torch.tensor([0.95, 0.95, 0.95], device = rendered_image.device, dtype = rendered_image.dtype)
+                #edited_mask = torch.any(edited_image <= rgb_threshold, dim=-1).unsqueeze(-1).float()
+                # if iteration % args.visualization_frequency == 0:
+                #     import matplotlib.pyplot as plt
+                #     edit_mask_path = (images_save_path / str(vi) / "edit_mask") if use_fixed_views else (images_save_path / "edit_mask")
+                #     edit_mask_path.mkdir(parents=True, exist_ok=True)
+                #     plt.imsave(edit_mask_path / f'neuralshading_{iteration}.png', edited_mask.repeat(1, 1, 3).float().cpu().numpy())
                 # rendered_image = Image.fromarray(rendered_image.type(torch.uint8).cpu().numpy())
                 # gt_color = Image.fromarray(gt_color.type(torch.uint8).cpu().numpy())
                 # rendered_image.save(shaded_path / f'rendered_{iteration}.png')
                 # gt_color.save(shaded_path / f'gt_{iteration}.png')
                 # exit()
                 
+                
                 if use_fixed_views:
                     edited_views[vi].color = edited_image
+                    #edited_views[vi].mask = edited_mask
                 else:
                     edited_views[edit_view_indices[ri]].color = edited_image
+                    #edited_views[edit_view_indices[ri]].mask = edited_mask
+                
+                # if iteration > 10151 and changed_view < 64:
+                #     views[vi].color = rendered_image
+                #     views[vi].mask = mask
+                #     changed_view+=1
+                #     if changed_view == 64:
+                #         print("all views changed, switching to freenerf")
+                #         if args.fourier_features == "freenerf":
+                #             freenerf = True
                
 
         if (args.save_frequency > 0) and (iteration == 1 or iteration % args.save_frequency == 0):

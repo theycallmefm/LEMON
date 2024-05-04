@@ -56,6 +56,7 @@ CONTROLNET_SOURCE = "fusing/stable-diffusion-v1-5-controlnet-normal"
 
 CONTROLNET_NORMAL_SOURCE = "lllyasviel/control_v11p_sd15_normalbae"
 CONTROLNET_IP2P_SOURCE = "lllyasviel/control_v11e_sd15_ip2p"
+CONTROLNET_DEPTH_SOURCE = "lllyasviel/sd-controlnet-depth"
 
 @dataclass
 class UNet2DConditionOutput:
@@ -74,19 +75,30 @@ class MultiControlNet(nn.Module):
         self.device = device
         self.num_train_timesteps = num_train_timesteps
         self.ip2p_use_full_precision = ip2p_use_full_precision
+        self.controlnet_names = args.controlnet
+        controlnets = []
+        out = "Using"
+        for name in args.controlnet:
+            if name == "ip2p":
+                controlnets.append(ControlNetModel.from_pretrained(CONTROLNET_IP2P_SOURCE, torch_dtype=torch.float16))
+            elif name =="normal":
+                controlnets.append(ControlNetModel.from_pretrained(CONTROLNET_NORMAL_SOURCE, torch_dtype=torch.float16))
+            elif name =="depth":
+                controlnets.append(ControlNetModel.from_pretrained(CONTROLNET_DEPTH_SOURCE, torch_dtype=torch.float16))
+            out += " "+name
+        print(out)
 
-        
-        normal_controlnet = ControlNetModel.from_pretrained(CONTROLNET_NORMAL_SOURCE, torch_dtype=torch.float16)
-        ip2p_controlnet = ControlNetModel.from_pretrained(CONTROLNET_IP2P_SOURCE, torch_dtype=torch.float16)
-
-        self.nets = nn.ModuleList([ip2p_controlnet, normal_controlnet]).to(device)
-        self.conditioning_scale = [args.cfg_ip2p, args.cfg_normal]
+        self.nets = nn.ModuleList(controlnets).to(device)
+        self.conditioning_scale = []
+        for condition in args.conditioning_scale:
+            self.conditioning_scale.append(condition)
+        #self.conditioning_scale = [args.cfg_ip2p, args.cfg_normal]
 
 
         #self.nets = nn.ModuleList([normal_controlnet]).to(device)
         #self.conditioning_scale = [args.cfg_normal]
         
-        pipe = StableDiffusionControlNetPipeline.from_pretrained( SD_SOURCE, controlnet=[ip2p_controlnet, normal_controlnet], safety_checker=None, torch_dtype=torch.float16)
+        pipe = StableDiffusionControlNetPipeline.from_pretrained( SD_SOURCE, controlnet=controlnets, safety_checker=None, torch_dtype=torch.float16)
         #pipe = StableDiffusionControlNetPipeline.from_pretrained( SD_SOURCE, controlnet=[normal_controlnet], safety_checker=None, torch_dtype=torch.float16)
         #TODO check controlnet scheduler
         pipe.scheduler = DDIMScheduler.from_pretrained(DDIM_SOURCE, subfolder="scheduler")
@@ -131,12 +143,13 @@ class MultiControlNet(nn.Module):
         rendered_image: Float[Tensor, "BS 3 H W"],
         gt_cond: Float[Tensor, "BS 3 H W"],
         normal_cond: Float[Tensor, "BS 3 H W"],
+        depth_cond: Float[Tensor, "BS 3 H W"],
         guidance_scale: float = 7.5,
         diffusion_steps: int = 20,
         lower_bound: float = 0.70,
         upper_bound: float = 0.98,
         noise = None,
-        latent_weight: float = 0.9
+        latent_weight: float = 0.9,
     ) -> torch.Tensor:
         """Edit an image for Instruct-NeRF2NeRF using InstructPix2Pix
         Args:
@@ -161,22 +174,36 @@ class MultiControlNet(nn.Module):
         self.scheduler.config.num_train_timesteps = T.item()
         self.scheduler.set_timesteps(diffusion_steps)
 
-        if noise == None:
-            with torch.no_grad():
-                # prepare image and image_cond latents
-                render_latents = self.imgs_to_latent(rendered_image)
+        
+        with torch.no_grad():
+            # prepare image and image_cond latents
+            render_latents = self.imgs_to_latent(rendered_image)
+            if latent_weight < 1.0:
                 gt_latents = self.imgs_to_latent(gt_cond)
-                #gt_latents = self.prepare_image_latents(image_cond)
-                #image_cond_latents = self.prepare_image_latents(image_cond)
+                #gt_latents = self.imgs_to_latent(normal_cond)
                 latents = latent_weight * render_latents + (1 - latent_weight) * gt_latents
-                #latents = render_latents
-                #latents = gt_latents
+            else:
+                latents = render_latents
+            #gt_latents = self.prepare_image_latents(image_cond)
+            #image_cond_latents = self.prepare_image_latents(image_cond)
+            #latents = render_latents
+            #latents = gt_latents
             # add noise
-            noise = torch.randn_like(latents)    
+        if noise == None:
+            noise = torch.randn_like(latents)      
         latents = self.scheduler.add_noise(latents, noise, self.scheduler.timesteps[0])  # type: ignore
         #latents = noise
         # sections of code used from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
-        controlnet_cond = [gt_cond, normal_cond]
+        controlnet_cond = []
+        for name in self.controlnet_names: #TODO change input gt_cond, normal_cond to conds, make this more abstract
+            if name == "ip2p":
+                controlnet_cond.append(rendered_image)
+            elif name == "normal":
+                controlnet_cond.append(normal_cond)
+            elif name == "depth" and depth_cond!= None: #TODO fix this
+                controlnet_cond.append(depth_cond)
+        
+        #controlnet_cond = [rendered_image, normal_cond]
         #controlnet_cond = [normal_cond]
         
         for i, t in enumerate(self.scheduler.timesteps):

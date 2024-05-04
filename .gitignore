@@ -6,3 +6,4 @@
 ./instruct_pix2pix
 ./dtu-512
 ./out
+*.pyc

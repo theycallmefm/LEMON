@@ -1,6 +1,6 @@
 experiment_name: "experiment/skull/spiderman-ip2p06-n02-condrender-inputgt"
-input_dir: "./dtu-512-384/65_skull/views"
-input_bbox: "./dtu-512-384/65_skull/bbox.txt"
+input_dir: "./data/dtu-512-384/65_skull/views"
+input_bbox: "./data/dtu-512-384/65_skull/bbox.txt"
 output_dir: "./out/"
 initial_mesh: "vh32"
 image_scale: 1.0
@@ -48,3 +48,6 @@ edit_begin: 2000
 edit_frequency: 10 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
 edit_save_frequency: 500
 comment: "controlnet input:0.9 render latent + 0.1 normal_latent + random noise, condition:original,normal 512 size without crop"
+# Benchmark
+benchmark: true
+benchmark_dir: "./benchmark/imgs/skull-spiderman"

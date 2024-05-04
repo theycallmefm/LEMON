@@ -7,3 +7,4 @@
 ./dtu-512
 ./out
 *.pyc
+benchmark/imgs

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from scipy.spatial.transform import Rotation as R
 import numpy as np
 from pathlib import Path
 from pyremesh import remesh_botsch
@@ -9,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from nds.core import (
-    Mesh, Renderer
+    Mesh, Renderer, View, Camera
 )
 from nds.losses import (
     mask_loss, normal_consistency_loss, laplacian_loss, shading_loss
@@ -131,6 +132,54 @@ def update_gt_views(views, mesh, renderer):
             # plt.imsave(shaded_path / f'rendered_{iteration}_{i}.png', views[i].color.detach().cpu().numpy())
             # print("updated views")
     print("updated views")
+
+def get_forward_vector(rotation_matrix):
+    # Assuming the forward vector is the third column of the rotation matrix
+    return rotation_matrix[:, 2]
+
+def average_vectors(v1, v2):
+    # Simple average of two vectors
+    return (v1 + v2) / 2
+
+def create_rotation_matrix_towards_vector(target_vector):
+    # Construct a rotation matrix that aligns the Z-axis with the target vector
+    # This is a simplified approach and might need adjustments for your specific use case
+    
+    # Normalize the target vector
+    target_vector = target_vector / np.linalg.norm(target_vector)
+    
+    # Assuming the up vector is [0, 1, 0] (y-axis)
+    up_vector = np.array([0, 1, 0])
+    
+    # Compute the right vector as cross product of up and target
+    right_vector = np.cross(up_vector, target_vector)
+    right_vector = right_vector / np.linalg.norm(right_vector)
+    
+    # Recompute the up vector to ensure orthogonality
+    up_vector = np.cross(target_vector, right_vector)
+    
+    # Assemble the rotation matrix
+    rotation_matrix = np.vstack([right_vector, up_vector, target_vector]).T
+    return rotation_matrix
+
+
+def approximate_mid_camera(camera_0: Camera, camera_1: Camera, device: torch.device) -> Camera:
+    """Approximates a middle camera pose"""
+    # K shouldn't change much between views
+    approx_K = camera_0.K
+    # Simply place mid view in between view_0 and view_1 by averaging t vectors
+    approx_t = average_vectors(camera_0.t, camera_1.t)
+    # Approximating a middle R is not as straightforward
+    # Get forward vectors
+    forward_0 = get_forward_vector(camera_0.R)
+    forward_1 = get_forward_vector(camera_1.R)
+    # Average the forward vectors
+    approx_R_forward = average_vectors(forward_0, forward_1)
+    # Create a new rotation matrix (R2) that aligns with this average direction
+    approx_R = torch.Tensor(create_rotation_matrix_towards_vector(approx_R_forward.cpu()))
+    mid_camera = Camera(approx_K, approx_R, approx_t, device=device)
+    return mid_camera
+
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='Multi-View Mesh Reconstruction with Neural Deferred Shading', formatter_class=ArgumentDefaultsHelpFormatter)
@@ -441,6 +490,30 @@ if __name__ == '__main__':
             losses['laplacian'] = laplacian_loss(mesh)
         if loss_weights['shading'] > 0:
             losses['shading'] = shading_loss(edited_subset, gbuffers, shader=shader, shading_percentage=args.shading_percentage, freenerf=freenerf, iteration = iteration, images_save_path = images_save_path, edit = edit)
+
+        if args.benchmark:
+            benchmark_views = []
+            for i in range(len(views)-1):
+                benchmark_views.append(views[i])
+                mid_camera = approximate_mid_camera(views[i].camera, views[i+1].camera, device=device)
+                # For our purposes, color and mask doesn't really matter
+                mid_view = View(views[i].color, views[i].mask, mid_camera, device=device)
+                benchmark_views.append(mid_view)
+
+        if args.benchmark and iteration > args.edit_begin-1 and iteration % 1000 == 0:
+            import matplotlib.pyplot as plt
+            args.benchmark_dir = Path(args.benchmark_dir)
+            with torch.no_grad():
+                # TODO how do we render views from angles other than training view angles?
+                benchmark_gbuffers = renderer.render(benchmark_views, mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)
+                for i, gbuffer in enumerate(benchmark_gbuffers):
+                    position = gbuffer['position']
+                    normal = gbuffer['normal']
+                    view_direction = torch.nn.functional.normalize(benchmark_views[i].camera.center - position, dim=-1)
+                    shaded_image = shader(position, normal, view_direction, iteration) * gbuffer["mask"] + (1-gbuffer["mask"])
+                    benchmark_iter_path = args.benchmark_dir / f'{iteration}'
+                    benchmark_iter_path.mkdir(parents=True, exist_ok=True)
+                    plt.imsave(benchmark_iter_path / f'view_{i}.png', shaded_image.cpu().numpy())
 
         loss = torch.tensor(0., device=device)
         for k, v in losses.items():

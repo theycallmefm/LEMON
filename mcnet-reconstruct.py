@@ -385,48 +385,8 @@ if __name__ == '__main__':
             vertex_offsets = torch.zeros_like(mesh_initial.vertices)
             vertex_offsets.requires_grad = True
             optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
-            # if iteration == args.upsample_iterations[len(args.upsample_iterations)-1]:
-            #     update_gt_views(views, mesh_initial, renderer)
-            #     shaded_path = images_save_path / "loss"
-            #     shaded_path.mkdir(parents=True, exist_ok=True)
-            #     plt.imsave(shaded_path / f'rendered_{iteration}_{0}.png', views[0].color.detach().cpu().numpy())
+            
         
-        # if iteration == 10000: #smurf-sonic-upscale2-changewithrendermask_any_lrmasklossincrease
-        #     # Create a new optimizer for the vertex offsets
-        #     loss_weights['mask'] *= 2
-        #     lr_vertices *=2.0
-        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
-        #     vertex_offsets.requires_grad = True
-        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
-        
-        
-        # if iteration == args.edit_begin:
-        #     mesh_initial = mesh
-        #     lr_vertices = args.lr_vertices
-        #     # Create a new optimizer for the vertex offsets
-        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
-        #     vertex_offsets.requires_grad = True
-        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
-        
-        # if iteration == args.edit_begin+2000:
-        #     mesh_initial = mesh
-        #     lr_vertices *=0.75
-        #     # Create a new optimizer for the vertex offsets
-        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
-        #     vertex_offsets.requires_grad = True
-        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
-
-        # if iteration == args.edit_begin+4000:
-        #     mesh_initial = mesh
-        #     lr_vertices *=0.75
-        #     # Create a new optimizer for the vertex offsets
-        #     vertex_offsets = torch.zeros_like(mesh_initial.vertices)
-        #     vertex_offsets.requires_grad = True
-        #     optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
-        # if iteration == args.edit_begin:
-        #     gt_vertices = mesh_initial.vertices
-        #     loss_weights['chamfer'] = args.weight_chamfer
-        # Deform the initial mesh
         mesh = mesh_initial.with_vertices(mesh_initial.vertices + vertex_offsets) #vertex_offsets.requires_grad = True
         views_subset, edited_subset, edit_view_indices = view_sampler(views, edited_views)
         
@@ -458,7 +418,7 @@ if __name__ == '__main__':
         rendered_images, normal_images, depth_images, masks = [], [], [], []
         view_indices = []
         # Visualizations
-        if(args.visualization_frequency > 0) and shader and (iteration == 1 or iteration % args.visualization_frequency == 0 or iteration % 2004 == 0):
+        if(args.visualization_frequency > 0) and shader and (iteration == 1 or iteration % args.visualization_frequency == 0):
         #if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):
             import matplotlib.pyplot as plt
             with torch.no_grad():
@@ -475,7 +435,7 @@ if __name__ == '__main__':
                     # Save the shaded rendering
                     shaded_image = shader(position, normal, view_direction, iteration) if freenerf else shader(position, normal, view_direction) 
                     shaded_image = shaded_image * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
-                    rendered_images.append(shaded_image)
+                    #rendered_images.append(shaded_image)
 
                     
                     
@@ -518,18 +478,17 @@ if __name__ == '__main__':
                     device = normal_image.device
                     normal_image = normal_image.cpu().numpy()
                     normal_image = np.array((normal_image - np.min(normal_image)) / (np.max(normal_image) - np.min(normal_image))) #fix floating point image rgb values issue
-                    normal_images.append(torch.tensor(normal_image,device=device))
+                    #normal_images.append(torch.tensor(normal_image,device=device))
                     plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image)
                                   
         #Edit views
         if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % edit_frequency == 0) and not refinement:       
             if rendered_images == []:
                 with torch.no_grad():
-                    use_fixed_views = len(args.visualization_views) > 0
-                    view_indices = args.visualization_views if use_fixed_views else [np.random.choice(list(range(len(edited_subset))))]
+                    view_indices = [np.random.choice(list(range(len(edited_subset))))]
                     for vi in view_indices:
                         #debug_gt_view = views[vi] if use_fixed_views else views_subset[vi]
-                        debug_view = edited_views[vi] if use_fixed_views else edited_subset[vi]
+                        debug_view = edited_subset[vi]
                         debug_gbuffer = renderer.render([debug_view], mesh, channels=['mask', 'position', 'normal', 'depth'], with_antialiasing=True)[0]
                         position, normal, depth = debug_gbuffer["position"], debug_gbuffer["normal"], debug_gbuffer["depth"]
                         view_direction = torch.nn.functional.normalize(debug_view.camera.center - position, dim=-1)
@@ -563,7 +522,7 @@ if __name__ == '__main__':
                         
 
             for ri, vi in enumerate(view_indices):
-                gt_view = views[vi] if use_fixed_views else views_subset[vi]
+                gt_view = views_subset[vi]
                 
                 #mask = (gt_view.mask > 0) & (masks[ri] > 0)
                 
@@ -591,11 +550,10 @@ if __name__ == '__main__':
                 # exit()
                 
                 
-                if use_fixed_views:
-                    edited_views[vi].color = edited_image
+                # if use_fixed_views:
+                #     edited_views[vi].color = edited_image
                     #edited_views[vi].mask = edited_mask
-                else:
-                    edited_views[edit_view_indices[ri]].color = edited_image
+                edited_views[edit_view_indices[ri]].color = edited_image
                     #edited_views[edit_view_indices[ri]].mask = edited_mask
                 
                 # if iteration > 10151 and changed_view < 64:

@@ -21,6 +21,7 @@ class View:
         self.mask = mask.to(device)
         self.camera = camera.to(device)
         self.device = device
+        self.heatmap = None
 
     @classmethod
     def load(cls, image_path, device='cpu'):
@@ -67,6 +68,7 @@ class View:
         self.color = self.color.to(device)
         self.mask = self.mask.to(device)
         self.camera = self.camera.to(device)
+        self.heatmap = self.heatmap.to(device)
         self.device = device
         return self
 

@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 from pyremesh import remesh_botsch
 import torch
+from torch.nn import functional as F
 from tqdm import tqdm
 
 from nds.core import (
@@ -22,54 +23,36 @@ from nds.utils import (
 )
 
 from einops import rearrange
-from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UniPCMultistepScheduler
 import torch
 from PIL import Image
-from ip2p import MultiControlNet, ControlNet
+from controlnet import MultiControlNet
 import yaml, shutil, os
 
 CONTROLNET_NORMAL_SOURCE = "lllyasviel/control_v11p_sd15_normalbae"
 CONTROLNET_IP2P_SOURCE = "lllyasviel/control_v11e_sd15_ip2p"
 
 SD_SOURCE = "runwayml/stable-diffusion-v1-5"
+SD_INPAINTING_SOURCE =  "runwayml/stable-diffusion-inpainting"
+
 import yaml
+from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+import trimesh
+
+import matplotlib.pyplot as plt
+
+import torch
+import torch.nn.functional as F
+from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+from generate_scores import paint_mesh_parallel, mask_image, save_colored_mesh
 
 
-def blackbox_update_view(original_image, rendered_image, pipe, args, normal_image, iteration, path, noise = None):
-    original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2).to(torch.float16)
-    rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2).to(torch.float16)
-    normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2).to(torch.float16)
-    
-    prompt = args.prompt
-    negative_prompt = args.negative_prompt
-    images = [original_image, normal_image]
-    # rendered_image.save(shaded_path / f'rendered_{iteration}.png')
-    #shaded_path = (images_save_path / "shaded"/ f'neuralshading_{iteration}.png' )
-    #normal_path = (images_save_path / "normal"/ f'neuralshading_{iteration}.png' )
-    #rendered_image = Image.open(shaded_path)
-    #normal_image = Image.open(normal_path)
-    #images = [rendered_image, normal_image]
-    generator = torch.Generator(device="cpu").manual_seed(42)
-    edited_image = pipe(
-        prompt,
-        images,
-        num_inference_steps=10,
-        generator=generator,
-        #negative_prompt=negative_prompt,
-        controlnet_conditioning_scale=args.conditoning_scale,
-    ).images[0]
-    
-    if (iteration % args.edit_save_frequency == 0):
-        saved_image_path = str(edits_save_path)+"/"+str(iteration)+".png"
-        edited_image.save(saved_image_path)
-    edited_image = torch.tensor(np.array(edited_image), device = original_image.device) / 255.0
-
-    return edited_image
-
-def our_update_view(original_image, rendered_image, model, args, normal_image, iteration, path, noise = None, latent_weight = None, depth_image = None):
+def update_view(original_image, rendered_image, model, args, normal_image, iteration, noise = None, latent_weight = None, depth_image = None, heatmap = None):
     original_image = original_image.unsqueeze(0).permute(0, 3, 1, 2)
     rendered_image = rendered_image.unsqueeze(0).permute(0, 3, 1, 2)
     normal_image = normal_image.unsqueeze(0).permute(0, 3, 1, 2)
+    
+    if heatmap != None:
+        heatmap = heatmap.unsqueeze(0).permute(0, 3, 1, 2)
     
     #conditions = [original_image,normal_image]
     if depth_image != None:
@@ -81,6 +64,7 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, i
         normal_image = normal_image.to(torch.float16)
         if depth_image != None:
             depth_image = depth_image.to(torch.float16)
+    
     ip2p_device = model.device
     
     if not latent_weight:
@@ -102,46 +86,38 @@ def our_update_view(original_image, rendered_image, model, args, normal_image, i
                             original_image,
                             normal_image,
                             depth_image,
+                            heatmap,
                             guidance_scale = guidance_scale,
                             diffusion_steps = diffusion_steps,
                             noise = noise,
                             latent_weight = latent_weight,
+                            threshold = args.heatmap_threshold
                         )
         
+    #heatmap = generate_heatmap(rendered_image, prompt,  seg_processor, seg_model)
     edited_image = rearrange(edited_image, "1 c h w -> h w c")
     if (iteration % args.edit_save_frequency == 0):
         edit_x = 255.0 * edited_image
         saved_image = Image.fromarray(edit_x.type(torch.uint8).cpu().numpy())
         saved_image_path = str(edits_save_path)+"/"+str(iteration)+".png"
         saved_image.save(saved_image_path)
+        # if heatmap != None:
+        #     save_heatmap_as_png(heatmap_tensor=heatmap, filename= str(edits_save_path)+"/"+str(iteration)+"_heatmap.png")
+    #heatmap = rearrange(heatmap, "c h w -> h w c")
+    #return edited_image, heatmap
     return edited_image
 
-def update_gt_views(views, mesh, renderer):
-    with torch.no_grad():
-        for i, view in enumerate(views):
-            gbuffer = renderer.render([view], mesh, channels=['mask', 'position', 'normal'], with_antialiasing=True)[0]
-            #dataset update
-            position, normal = gbuffer["position"], gbuffer["normal"]
-            view_direction =  torch.nn.functional.normalize(view.camera.center - position, dim=-1)
-            views[i].color = shader(position, normal, view_direction, iteration) * gbuffer["mask"] + (1-gbuffer["mask"])
-            rgb_threshold = torch.tensor([0.95, 0.95, 0.95], device = views[i].color.device, dtype = views[i].color.dtype)
-            views[i].mask = torch.any(views[i].color <= rgb_threshold, dim=-1).unsqueeze(-1).float()
-            # shaded_path = images_save_path / "loss"
-            # shaded_path.mkdir(parents=True, exist_ok=True)
-            # plt.imsave(shaded_path / f'rendered_{iteration}_{i}.png', views[i].color.detach().cpu().numpy())
-            # print("updated views")
-    print("updated views")
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='Multi-View Mesh Reconstruction with Neural Deferred Shading', formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('--config', type=str, default=None, help='Path to YAML configuration file')
 
 
-    parser.add_argument('--input_dir', type=Path, default="./data/122_owl_resized/views", help="Path to the input data")
-    parser.add_argument('--input_bbox', type=Path, default="./data/122_owl/bbox.txt", help="Path to the input bounding box. If None, it is computed from the input mesh")
+    parser.add_argument('--input_dir', type=Path, default="./data/122_owl_resized/", help="Path to the input data")
+    parser.add_argument('--object_name', type=Path, default="./data/122_owl/bbox.txt", help="Path to the input bounding box. If None, it is computed from the input mesh")
     parser.add_argument('--output_dir', type=Path, default="./out", help="Path to the output directory")
     parser.add_argument('--experiment_name', type=Path, default="experiment", help="Name of this run")
-    parser.add_argument('--initial_mesh', type=str, default="vh32", help="Initial mesh, either a path or one of [vh16, vh32, vh64, sphere16]")
+    parser.add_argument('--initial_mesh', type=str, default=None, help="Initial mesh, either a path or one of [vh16, vh32, vh64, sphere16]")
     parser.add_argument('--image_scale', type=int, default=1, help="Scale applied to the input images. The factor is 1/image_scale, so image_scale=2 halves the image size")
     parser.add_argument('--iterations', type=int, default=2000, help="Total number of iterations")
     parser.add_argument('--lr_vertices', type=float, default=1e-3, help="Step size/learning rate for the vertex positions")
@@ -192,7 +168,12 @@ if __name__ == '__main__':
     parser.add_argument('--edit_frequency', type=int, default=10, help="editing frequency, when to edit")
     parser.add_argument('--edit_save_frequency', type=int, default=10, help="editing frequency, when to save edit")
     parser.add_argument('--comment', type=str, default="", help="")
-   
+
+    parser.add_argument('--heatmap_threshold', type=float, default=0.7, help = "heatmap threshold for mesh vertice selection")
+    parser.add_argument('--shader_path', type=str, default="", help="")
+
+    parser.add_argument('--heatmap_mask', type=bool, default=True, help="Enable heatmap mask")
+    parser.add_argument('--vertice_mask', type=bool, default=True, help="Enable vertice mask")
     # Add module arguments
     EditViewSampler.add_arguments(parser) #TODO check this
     args = parser.parse_args()
@@ -212,80 +193,80 @@ if __name__ == '__main__':
 
     # Select the device
     device = torch.device('cpu')
+    if args.seed:
+        torch.manual_seed(args.seed)
     if torch.cuda.is_available() and args.device >= 0:
         device = torch.device(f'cuda:{args.device}')
-    print(f"Using device {device}")
+        if args.seed:
+            torch.cuda.manual_seed(args.seed)
+    print(f"Using device: {device} seed: {args.seed}")
     print(f"Training {args.experiment_name}")
 
-    if args.pipeline == "our-mcnet":
-        #Our pipeline
-        print("using ours")
-        ip2p_use_full_precision = False
-        if args.ip2p_use_full_precision:
-            print("using full precision")
-            ip2p_use_full_precision = True
-        else:
-            print("using half precision")
-        pipe = MultiControlNet(device, ip2p_use_full_precision=ip2p_use_full_precision, args=args) #TODO change naming pipe to model later
-        update_view = our_update_view
-    elif args.pipeline == "blackbox-mcnet":
-        #Blackbox Multicontrolnet
-        print("using blackbox")
-        controlnet = [
-            ControlNetModel.from_pretrained(CONTROLNET_IP2P_SOURCE, torch_dtype=torch.float16),
-            ControlNetModel.from_pretrained(CONTROLNET_NORMAL_SOURCE, torch_dtype=torch.float16),
-        ]
-
-        pipe = StableDiffusionControlNetPipeline.from_pretrained(
-            SD_SOURCE, controlnet=controlnet, torch_dtype=torch.float16, safety_checker = None
-        )
-        pipe.to(device)
-        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-        update_view = blackbox_update_view
-
-        #pipe.enable_xformers_memory_efficient_attention()
-        #pipe.enable_model_cpu_offload()
-    elif args.pipeline =="controlnet-ip2p":
-        #Our pipeline
-        print("using ours")
+    #Our pipeline
+    ip2p_use_full_precision = False
+    if args.ip2p_use_full_precision:
+        print("using full precision")
         ip2p_use_full_precision = True
-        pipe = ControlNet(device, ip2p_use_full_precision=ip2p_use_full_precision, args=args) #TODO change naming pipe to model later
-        update_view = our_update_view
+    else:
+        print("using half precision")
+    pipe = MultiControlNet(device, ip2p_use_full_precision=ip2p_use_full_precision, args=args) #TODO change naming pipe to model later
+    
+    seg_processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
+    seg_model = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(device)
+        
+
 
     args.output_dir, args.input_dir, args.experiment_name = Path(args.output_dir), Path(args.input_dir), Path(args.experiment_name)
+    args.input_dir = args.input_dir / args.object_name
+    args.output_dir = args.output_dir /args.object_name
     experiment_dir = args.output_dir /  args.experiment_name
 
     images_save_path = experiment_dir / "images"
     meshes_save_path = experiment_dir / "meshes"
     shaders_save_path = experiment_dir / "shaders"
     edits_save_path = experiment_dir / "edits"
+    heatmaps_save_path = experiment_dir / "heatmaps"
+    mesh_heatmaps_save_path = experiment_dir / "mesh_heatmaps"
     images_save_path.mkdir(parents=True, exist_ok=True)
     meshes_save_path.mkdir(parents=True, exist_ok=True)
     shaders_save_path.mkdir(parents=True, exist_ok=True)
     edits_save_path.mkdir(parents=True, exist_ok=True)
+    heatmaps_save_path.mkdir(parents=True, exist_ok=True)
+    mesh_heatmaps_save_path.mkdir(parents=True, exist_ok=True)
     
     if args.config:
         shutil.copy(args.config, os.path.join(experiment_dir, os.path.basename(args.config)))
 
     # Read the views one for ground truth, one for edited
-    views = read_views(args.input_dir, scale=args.image_scale, device=device)
-    edited_views = read_views(args.input_dir, scale=args.image_scale, device=device)
-    
+    views_dir = args.input_dir / "views"
+    input_bbox  =  args.input_dir / "bbox.txt"
+    views = read_views(views_dir, scale=args.image_scale, device=device)
+    edited_views = read_views(views_dir, scale=args.image_scale, device=device)
+
+    #paths for mesh, shader and heatmap is fixed
+    if args.initial_mesh == None:
+        initial_mesh =  args.input_dir / "mesh_002000.obj"
+        heatmap_path =  args.input_dir / "mesh_heatmaps"
+        heatmap_path.mkdir(parents=True, exist_ok=True)
+        json_path = os.path.join(heatmap_path, args.prompt.replace(" ", "_") + "_rendered_scores.json")
+    else:
+        initial_mesh = args.initial_mesh
+    shader_path =  args.input_dir / "shader_002000.pt"    #TODO fix this
     # Obtain the initial mesh and compute its connectivity
     mesh_initial: Mesh = None
-    if args.initial_mesh in mesh_generator_names:
+    if initial_mesh in mesh_generator_names:
         # Use args.initial_mesh as mesh generator name
-        if args.input_bbox is None:
+        if input_bbox is None:
             raise RuntimeError("Generated meshes require a bounding box.")
-        mesh_initial = generate_mesh(args.initial_mesh, edited_views, AABB.load(args.input_bbox), device=device)
+        mesh_initial = generate_mesh(initial_mesh, edited_views, AABB.load(input_bbox), device=device)
     else:
         # Use args.initial_mesh as path to the mesh
-        mesh_initial = read_mesh(args.initial_mesh, device=device)
+        mesh_initial = read_mesh(initial_mesh, device=device)
     mesh_initial.compute_connectivity()
 
     # Load the bounding box or create it from the mesh vertices
-    if args.input_bbox is not None: #TODO check if bbox are changed when resizing
-        aabb = AABB.load(args.input_bbox)
+    if input_bbox is not None: #TODO check if bbox are changed when resizing
+        aabb = AABB.load(input_bbox)
     else:
         aabb = AABB(mesh_initial.vertices.cpu().numpy())
     aabb.save(experiment_dir / "bbox.txt")
@@ -327,6 +308,13 @@ if __name__ == '__main__':
                           device=device, L = args.L, T = args.T)
     optimizer_shader = torch.optim.Adam(shader.parameters(), lr=args.lr_shader)
 
+    if os.path.exists(shader_path):
+        state_dict = torch.load(shader_path)
+        # If you get 'Attempting to deserialize object on CUDA device 1..' error, you may need to specify device:
+        # state_dict = torch.load(shader_path, map_location='cuda:0')
+        shader.load_state_dict(state_dict["state_dict"])
+        print("SHADER LOADED")
+
     # Initialize the loss weights and losses
     loss_weights = {
         "mask": args.weight_mask,
@@ -346,25 +334,36 @@ if __name__ == '__main__':
     # # Generate a random tensor with the same shape
     noise = torch.randn_like(template_tensor, device=device)
 
-    adaptable = False
-    changed_view  = 0
-    edit_frequency = args.edit_frequency
     progress_bar = tqdm(range(1, args.iterations + 1))
     latent_weight = args.latent_weight
-    refinement = False
-    refinement_begin = [4000,8000,12000,16000]
-    refinement_end = [6000,10000,14000,18000]
     for iteration in progress_bar:
         progress_bar.set_description(desc=f'Iteration {iteration}')
+        
+        if iteration == args.edit_begin:
+            edit = True
+            if args.vertice_mask or args.heatmap_mask:
+                if iteration == 1:
+                    mesh = mesh_initial.with_vertices(mesh_initial.vertices)
+                vertex_colors = torch.zeros((mesh.vertices.shape[0], 3), device=mesh.device)
+                vertex_scores = torch.zeros((mesh.vertices.shape[0], 1), device=mesh.device)
+                edited_views, vertex_scores, vertex_colors = paint_mesh_parallel(edited_views, mesh, renderer, args.prompt, seg_processor, seg_model, json_path
+                                                                                ,mesh_heatmaps_save_path, heatmaps_save_path)
+                save_colored_mesh(mesh, vertex_colors, str(meshes_save_path) + '/heatmap_all.obj')
+                # Apply heatmap threshold to zero out gradients
+                threshold = args.heatmap_threshold
 
-        # if iteration in refinement_begin:
-        #     refinement = True
-        # elif iteration in refinement_end:
-        #     refinement = False
-        #latent weight scheduling
-        if args.latent_step and iteration > args.edit_begin and iteration % args.latent_change_interval == 0 and latent_weight < args.max_latent_weight and latent_weight>args.min_latent_weight: #fight darkness
-            latent_weight += args.latent_step
-            print("LATENT WEIGHT CHANGED TO: ", latent_weight)
+                # Create low values mask
+                if args.vertice_mask:
+                    low_values_mask = vertex_scores < threshold
+
+                    # Get the indices of the unmasked vertex_scores
+                    unmasked_indices = torch.nonzero(~low_values_mask).squeeze()
+
+                    # Create the edit_vertex_offsets tensor with the same shape as the unmasked vertex_scores
+                    edit_vertex_offsets = torch.zeros((unmasked_indices.shape[0], 3), device=mesh.device)
+                    edit_vertex_offsets.requires_grad = True
+                    optimizer_edit_vertices = torch.optim.Adam([edit_vertex_offsets], lr=lr_vertices)
+
         if iteration in args.upsample_iterations:
             # Upsample the mesh by remeshing the surface with half the average edge length
             e0, e1 = mesh.edges.unbind(1)
@@ -387,7 +386,14 @@ if __name__ == '__main__':
             optimizer_vertices = torch.optim.Adam([vertex_offsets], lr=lr_vertices)
             
         
-        mesh = mesh_initial.with_vertices(mesh_initial.vertices + vertex_offsets) #vertex_offsets.requires_grad = True
+        if (iteration >= args.edit_begin) and args.vertice_mask:
+            new_vertex_offsets = torch.zeros_like(mesh_initial.vertices)
+            new_vertex_offsets[unmasked_indices[:, 0]] = edit_vertex_offsets
+            new_vertices  = mesh_initial.vertices + new_vertex_offsets
+        else:
+            new_vertices = mesh_initial.vertices + vertex_offsets
+        
+        mesh = mesh_initial.with_vertices(new_vertices) #vertex_offsets.requires_grad = True
         views_subset, edited_subset, edit_view_indices = view_sampler(views, edited_views)
         
         # Perform antialiasing here because we cannot antialias after shading if we only shade a some of the pixels:
@@ -400,26 +406,32 @@ if __name__ == '__main__':
         if loss_weights['laplacian'] > 0:
             losses['laplacian'] = laplacian_loss(mesh)
         if loss_weights['shading'] > 0:
-            losses['shading'] = shading_loss(edited_subset, gbuffers, shader=shader, shading_percentage=args.shading_percentage, freenerf=freenerf, iteration = iteration, images_save_path = images_save_path, edit = edit)
-
+            losses['shading'] = shading_loss(edited_subset, gbuffers, shader=shader, shading_percentage=args.shading_percentage)
+        
         loss = torch.tensor(0., device=device)
         for k, v in losses.items():
             loss += v * loss_weights[k]
 
         # Optimize
-        optimizer_vertices.zero_grad()
-        optimizer_shader.zero_grad()
+        if (iteration >= args.edit_begin) and args.vertice_mask:
+            optimizer_edit_vertices.zero_grad()
+        else:
+            optimizer_vertices.zero_grad()
+        
+        optimizer_shader.zero_grad()            
         loss.backward()
-        optimizer_vertices.step()
-        optimizer_shader.step()
 
+        optimizer_shader.step()
+        if (iteration >= args.edit_begin) and args.vertice_mask:
+            optimizer_edit_vertices.step()
+        else:
+            optimizer_vertices.step()
         progress_bar.set_postfix({'loss': loss.detach().cpu()})
 
         rendered_images, normal_images, depth_images, masks = [], [], [], []
         view_indices = []
         # Visualizations
         if(args.visualization_frequency > 0) and shader and (iteration == 1 or iteration % args.visualization_frequency == 0):
-        #if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):
             import matplotlib.pyplot as plt
             with torch.no_grad():
                 use_fixed_views = len(args.visualization_views) > 0
@@ -443,46 +455,20 @@ if __name__ == '__main__':
                     shaded_path.mkdir(parents=True, exist_ok=True)
                     plt.imsave(shaded_path / f'neuralshading_{iteration}.png', shaded_image.cpu().numpy())
 
-                    #depth_image = (depth - depth.min()) / (depth.max() - depth.min())
-
-                    # depth_image = torch.cat([depth, depth, depth], dim=2)
-                    # # Normalize the depth map between 0 and 1
-                    # depth_min = depth_image.min()  # Minimum value in the tensor
-                    # depth_max = depth_image.max()  # Maximum value in the tensor
-
-                    # # Perform normalization
-                    # depth_image = (depth_image - depth_min) / (depth_max - depth_min)  # Now [0, 1] range
-                    # depth_image = depth_image * debug_gbuffer["mask"] +(1-debug_gbuffer["mask"])
-
-                    # depth_image = 1 - depth_image
-                    # depth_images.append(depth_image)
-
-                    # depth_path = (images_save_path / str(vi) / "depth") if use_fixed_views else (images_save_path / "depth")
-                    # depth_path.mkdir(parents=True, exist_ok=True)
-                    # plt.imsave(depth_path / f'neuralshading_{iteration}.png', depth_image.cpu().numpy())
-
-                    # mask = (debug_view.mask > 0) & (debug_gbuffer["mask"] > 0)
-                    # #masks.append(mask)
-                    # mask_path = (images_save_path / str(vi) / "mask") if use_fixed_views else (images_save_path / "mask")
-                    # mask_path.mkdir(parents=True, exist_ok=True)
-                    # plt.imsave(mask_path / f'neuralshading_{iteration}.png', mask.repeat(1, 1, 3).float().cpu().numpy())
-
                     # Save a normal map in camera space
                     normal_path = (images_save_path / str(vi) / "normal") if use_fixed_views else (images_save_path / "normal")
                     normal_path.mkdir(parents=True, exist_ok=True)
                     R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], device=device, dtype=torch.float32)
 
-                    #normal_image = normal @ debug_view.camera.R.T @ R.T 
                     normal_image = (0.5*(normal @ debug_view.camera.R.T @ R.T + 1)) * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
                     
                     device = normal_image.device
                     normal_image = normal_image.cpu().numpy()
                     normal_image = np.array((normal_image - np.min(normal_image)) / (np.max(normal_image) - np.min(normal_image))) #fix floating point image rgb values issue
-                    #normal_images.append(torch.tensor(normal_image,device=device))
                     plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image)
                                   
         #Edit views
-        if (args.edit_begin) and (iteration >= args.edit_begin) and (iteration % edit_frequency == 0) and not refinement:       
+        if (iteration >= args.edit_begin) and (iteration % args.edit_frequency == 0):       
             if rendered_images == []:
                 with torch.no_grad():
                     view_indices = [np.random.choice(list(range(len(edited_subset))))]
@@ -497,20 +483,6 @@ if __name__ == '__main__':
                         shaded_image = shader(position, normal, view_direction, iteration) if freenerf else shader(position, normal, view_direction) 
                         shaded_image = shaded_image * debug_gbuffer["mask"] + (1-debug_gbuffer["mask"])
                         rendered_images.append(shaded_image)
-                        # mask = (debug_gt_view.mask > 0) & (debug_gbuffer["mask"] > 0)
-                        # masks.append(mask)
-
-                        # depth_image = torch.cat([depth, depth, depth], dim=2)
-                        # # Normalize the depth map between 0 and 1
-                        # depth_min = depth_image.min()  # Minimum value in the tensor
-                        # depth_max = depth_image.max()  # Maximum value in the tensor
-
-                        # # Perform normalization
-                        # depth_image = (depth_image - depth_min) / (depth_max - depth_min)  # Now [0, 1] range
-                        # depth_image = depth_image * debug_gbuffer["mask"] +(1-debug_gbuffer["mask"])
-
-                        # depth_image = 1 - depth_image
-                        # depth_images.append(depth_image)
 
                         R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], device=device, dtype=torch.float32)
                         #normal_image = normal @ debug_view.camera.R.T @ R.T 
@@ -522,49 +494,26 @@ if __name__ == '__main__':
                         
 
             for ri, vi in enumerate(view_indices):
-                gt_view = views_subset[vi]
-                
-                #mask = (gt_view.mask > 0) & (masks[ri] > 0)
-                
+                gt_view = views_subset[vi]                
                 gt_color = gt_view.color #* 255.0
                 rendered_image = rendered_images[ri] #* 255.0
-                
-                #edited_image = update_view(gt_color, rendered_image, model, args)
                 normal_image = normal_images[ri]
                 if depth_images!=[]:
                     depth_image = depth_images[ri]
-                #mask = masks[ri]
-                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, iteration, images_save_path, noise=None, latent_weight=latent_weight, depth_image=None)
+                heatmap =  edited_views[edit_view_indices[ri]].heatmap
+                edited_image = update_view(gt_color, rendered_image, pipe, args, normal_image, iteration, noise=None, latent_weight=latent_weight, depth_image=None, heatmap=heatmap)
                 
-                #rgb_threshold = torch.tensor([0.95, 0.95, 0.95], device = rendered_image.device, dtype = rendered_image.dtype)
-                #edited_mask = torch.any(edited_image <= rgb_threshold, dim=-1).unsqueeze(-1).float()
-                # if iteration % args.visualization_frequency == 0:
-                #     import matplotlib.pyplot as plt
-                #     edit_mask_path = (images_save_path / str(vi) / "edit_mask") if use_fixed_views else (images_save_path / "edit_mask")
-                #     edit_mask_path.mkdir(parents=True, exist_ok=True)
-                #     plt.imsave(edit_mask_path / f'neuralshading_{iteration}.png', edited_mask.repeat(1, 1, 3).float().cpu().numpy())
-                # rendered_image = Image.fromarray(rendered_image.type(torch.uint8).cpu().numpy())
-                # gt_color = Image.fromarray(gt_color.type(torch.uint8).cpu().numpy())
-                # rendered_image.save(shaded_path / f'rendered_{iteration}.png')
-                # gt_color.save(shaded_path / f'gt_{iteration}.png')
-                # exit()
-                
-                
-                # if use_fixed_views:
-                #     edited_views[vi].color = edited_image
-                    #edited_views[vi].mask = edited_mask
-                edited_views[edit_view_indices[ri]].color = edited_image
-                    #edited_views[edit_view_indices[ri]].mask = edited_mask
-                
-                # if iteration > 10151 and changed_view < 64:
-                #     views[vi].color = rendered_image
-                #     views[vi].mask = mask
-                #     changed_view+=1
-                #     if changed_view == 64:
-                #         print("all views changed, switching to freenerf")
-                #         if args.fourier_features == "freenerf":
-                #             freenerf = True
-               
+                if args.heatmap_mask:
+                    modified_gt_image, new_mask = mask_image(heatmap, edited_image, gt_color, args.heatmap_threshold)
+                    #modified_gt_image = blend_images_with_alpha(heatmap, edited_image, gt_color, args.heatmap_threshold)
+                    if iteration % args.visualization_frequency == 0:
+                        import matplotlib.pyplot as plt
+                        edit_mask_path = (images_save_path / str(vi) / "edit_mask") if use_fixed_views else (images_save_path / "edit_mask")
+                        edit_mask_path.mkdir(parents=True, exist_ok=True)
+                        plt.imsave(edit_mask_path / f'neuralshading_{iteration}.png', modified_gt_image.cpu().numpy())
+                    edited_views[edit_view_indices[ri]].color = modified_gt_image
+                else:
+                    edited_views[edit_view_indices[ri]].color = edited_image
 
         if (args.save_frequency > 0) and (iteration == 1 or iteration % args.save_frequency == 0):
             with torch.no_grad():

@@ -77,7 +77,7 @@ class Renderer:
         Rt = gl_transform @ Rt
         return projection_matrix @ Rt
 
-    def render(self, views, mesh, channels, with_antialiasing=True):
+    def render(self, views, mesh, channels, with_antialiasing=True, vertex_scores = None):
         """ Render G-buffers from a set of views.
 
         Args:
@@ -110,6 +110,12 @@ class Renderer:
 
             if "depth" in channels:
                 gbuffer["depth"] = view.project(gbuffer["position"], depth_as_distance=True)[..., 2:3]
+
+            if "score" in channels and vertex_scores != None:
+                score, _ = dr.interpolate(vertex_scores[None, ...], rast, idx)
+                gbuffer["score"] = dr.antialias(score, rast, pos, idx)[0] if with_antialiasing else score[0]
+            
+            gbuffer["face_idx"] = rast[..., 3:4].int() #gather face indices to keep track of vertices
 
             gbuffers += [gbuffer]
 

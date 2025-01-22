@@ -1,0 +1,44 @@
+experiment_name: "skull-clown"
+input_dir: "./data/dtu-512-384/"
+object_name: "65_skull"
+output_dir: "./out/"
+image_scale: 1.0
+iterations: 8000
+lr_vertices: 4.21875e-4
+lr_shader: 1.0e-3
+upsample_iterations: []
+save_frequency: 2000
+visualization_frequency: 2000
+visualization_views: []
+device: 0
+weight_mask: 2.0
+weight_normal: 6.4
+weight_laplacian: 2560.0
+weight_shading: 1.0
+shading_percentage: 0.75
+hidden_features_layers: 3
+hidden_features_size: 256
+fourier_features: "positional"
+activation: "relu"
+fft_scale: 4
+#freenerf #NOT IMPORTANT
+L: 4 #L_max = 2 * 3 * self.L + 3 
+T: 20000 
+#diffusion
+cfg_text: 7.5 #guidance scale for controlnet
+prompt: "Turn it into clown"
+negative_prompt: ""
+latent_weight: 0.5
+# controlnet conditioning
+controlnet: ["ip2p","normal"]
+conditioning_scale: [0.8, 0.2]
+ip2p_use_full_precision: 0
+seed: 42
+steps: 10
+edit_begin: 1
+edit_frequency: 10 #dataset is sequential for now, only 13 works in buddha/owl, look prima module factor if you want to change it https://en.wikipedia.org/wiki/Primitive_root_modulo_n
+edit_save_frequency: 2000
+heatmap_threshold: 0.0
+comment: "mask heatmap values which are smaller than 0.7 just take  all views edit edit loss"
+heatmap_mask: False
+vertice_mask: False

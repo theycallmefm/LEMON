@@ -3,6 +3,8 @@ import torch.nn as nn
 from typing import Callable, Dict, List
 
 from nds.core import View
+#from pytorch3d.loss import chamfer_distance
+
 
 class RandomSamples(object):
     def __init__(self, h, w, percentage=.5):
@@ -31,41 +33,23 @@ def shading_loss(views: List[View], gbuffers: List[Dict[str, torch.Tensor]], sha
     loss = 0
     sample_fn = lambda x: x
     for view, gbuffer in zip(views, gbuffers):
-        if not edit:
-            # Get valid area
-            mask = ((view.mask > 0) & (gbuffer["mask"] > 0)).squeeze()
-
-            # Sample only within valid area
-            if shading_percentage != 1:
-                sample_fn = RandomSamples(view.mask[mask].shape[0], 1, shading_percentage)
+        mask = ((view.mask > 0) & (gbuffer["mask"] > 0)).squeeze()
+        # Sample only within valid area
+        if shading_percentage != 1:
+            sample_fn = RandomSamples(view.mask[mask].shape[0], 1, shading_percentage)
         
-            target = sample_fn(view.color[mask])
+        target = sample_fn(view.color[mask])
+        position = sample_fn(gbuffer["position"][mask])
+        normal = sample_fn(gbuffer["normal"][mask])
 
-            position = sample_fn(gbuffer["position"][mask])
-            normal = sample_fn(gbuffer["normal"][mask])
-        else: #if edit = True don't use mask
-        
-            target = view.color
-            position = gbuffer["position"]
-            normal = gbuffer["normal"]
 
 
         view_direction = view.camera.center - position
         view_direction = torch.nn.functional.normalize(view_direction, dim=-1)
         
         rendered_image = shader(position, normal, view_direction, iteration) if freenerf else shader(position, normal, view_direction)
-
         loss += loss_function(rendered_image, target)
-        # if iteration >= 0:
-        #     import matplotlib.pyplot as plt
-        #     shaded_path = images_save_path / "loss"
-        #     shaded_path.mkdir(parents=True, exist_ok=True)
-        #     plt.imsave(shaded_path / f'rendered_{iteration}.png', rendered_image.detach().cpu().numpy())
-        #     plt.imsave(shaded_path / f'edit_gt_color_{iteration}.png', target.detach().cpu().numpy())
-        # if iteration == 700:
-        #     exit()
 
         
 
     return loss / len(views)
-        
